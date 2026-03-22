@@ -46,7 +46,7 @@ cargo build --release
 
 ### Pre-built binary (Linux amd64 / arm64)
 
-Downloads the latest CI artifact. Requires `gh auth login` or a `GITHUB_TOKEN`:
+Downloads the latest release — no authentication required:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/danielme85/wtop/main/remote-install.sh | sh

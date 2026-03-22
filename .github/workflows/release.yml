@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-latest
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (${{ matrix.platform }})
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: wtop:${{ matrix.platform }}
+
+      - name: Extract binary from image
+        run: |
+          container_id=$(docker create wtop:${{ matrix.platform }})
+          docker cp "$container_id:/usr/local/bin/wtop" ./wtop-linux-${{ matrix.platform }}
+          docker rm "$container_id"
+          chmod +x ./wtop-linux-${{ matrix.platform }}
+          file ./wtop-linux-${{ matrix.platform }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wtop-linux-${{ matrix.platform }}
+          path: ./wtop-linux-${{ matrix.platform }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/wtop-linux-*/wtop-linux-*

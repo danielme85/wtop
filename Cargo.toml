@@ -3,6 +3,8 @@ name = "wtop"
 version = "0.1.0"
 edition = "2021"
 description = "A nimble, asynchronous Docker container monitor TUI"
+license = "MIT"
+repository = "https://github.com/danielme85/wtop"
 
 [dependencies]
 bollard = "0.18"
