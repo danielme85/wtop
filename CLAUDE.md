@@ -69,6 +69,6 @@ Settings are persisted to `~/.config/wtop/settings.toml` and editable in-app via
 
 ## Style
 
-- Norse palette: ocean blue borders, amber/gold titles, green for "Running" status, slate grey background
+- Norse palette (default): ocean blue borders, amber/gold titles, green for "Running" status, black background
 - Rounded Unicode borders
-- Runic flourishes (᚛ ᚜) in header
+- Whale emoji (🐋) in header
