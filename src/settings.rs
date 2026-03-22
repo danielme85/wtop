@@ -327,6 +327,12 @@ pub struct Settings {
     pub show_disk_bar: bool,
     #[serde(default)]
     pub show_network_bar: bool,
+    #[serde(default = "default_true")]
+    pub log_color: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -343,6 +349,7 @@ impl Default for Settings {
             show_mem_bar: false,
             show_disk_bar: false,
             show_network_bar: false,
+            log_color: true,
         }
     }
 }
@@ -377,7 +384,4 @@ impl Settings {
         }
     }
 
-    /// Number of settings rows in the settings page.
-    /// 5 original + 1 poll_all + 8 column toggles + 4 bar toggles = 18
-    pub const ROW_COUNT: usize = 18;
 }

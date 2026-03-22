@@ -9,7 +9,10 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
+    LeaveAlternateScreen,
+};
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -92,14 +95,14 @@ async fn handle_action(
             if let Some(docker) = docker {
                 load_container_data(app, docker).await;
             }
-            app.page = Page::Detail;
+            app.set_page(Page::Detail);
             return;
         }
         ContainerAction::Logs => {
             if let Some(docker) = docker {
                 load_container_data(app, docker).await;
             }
-            app.page = Page::Logs;
+            app.set_page(Page::Logs);
             return;
         }
         _ => {}
@@ -141,67 +144,144 @@ async fn handle_action(
     }
 }
 
+/// Check if any mini bar is enabled without poll_all_containers and show a hint.
+fn check_poll_all_hint(app: &mut app::App) {
+    let any_bar = app.settings.show_cpu_bar
+        || app.settings.show_mem_bar
+        || app.settings.show_disk_bar
+        || app.settings.show_network_bar;
+    if any_bar && !app.settings.poll_all_containers {
+        app.info_popup = Some(
+            "To use performance indicators on the container overview page you have to enable \"Poll All Containers\".".to_string()
+        );
+    }
+}
+
+/// Settings grid layout.
+/// Left column:  General (0-5), Logs (18)      → 7 rows
+/// Right column: Columns (6-13), Mini Bars (14-17) → 12 rows
+///
+/// Grid is addressed as (column, row_within_column).
+/// These helpers convert between the flat selection index and grid position.
+/// Left-column flat indices in display order.
+const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 18];
+/// Right-column flat indices in display order.
+const RIGHT_COL: &[usize] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+
+fn settings_grid_pos(sel: usize) -> (usize, usize) {
+    // (column, row_within_column)
+    if let Some(row) = LEFT_COL.iter().position(|&i| i == sel) {
+        (0, row)
+    } else if let Some(row) = RIGHT_COL.iter().position(|&i| i == sel) {
+        (1, row)
+    } else {
+        (0, 0)
+    }
+}
+
+fn settings_from_grid(col: usize, row: usize) -> usize {
+    if col == 0 {
+        LEFT_COL[row.min(LEFT_COL.len() - 1)]
+    } else {
+        RIGHT_COL[row.min(RIGHT_COL.len() - 1)]
+    }
+}
+
+/// Adjust a setting value (next/prev).
+fn adjust_setting(app: &mut app::App, forward: bool) {
+    match app.settings_selection {
+        0 => app.settings.aggregation_mode = if forward {
+            app.settings.aggregation_mode.next()
+        } else {
+            app.settings.aggregation_mode.prev()
+        },
+        1 => if forward { app.settings.aggregation_window.increment() }
+             else { app.settings.aggregation_window.decrement() },
+        2 => app.settings.theme = if forward {
+            app.settings.theme.next()
+        } else {
+            app.settings.theme.prev()
+        },
+        3 => app.settings.refresh_rate = if forward {
+            app.settings.refresh_rate.next()
+        } else {
+            app.settings.refresh_rate.prev()
+        },
+        4 => app.settings.log_buffer_size = if forward {
+            app.settings.log_buffer_size.next()
+        } else {
+            app.settings.log_buffer_size.prev()
+        },
+        5 => {
+            app.settings.poll_all_containers = !app.settings.poll_all_containers;
+            if !app.settings.poll_all_containers {
+                app.all_history.clear();
+                app.all_stats.clear();
+            }
+        }
+        6..=13 => app.settings.columns.toggle(app.settings_selection - 6),
+        14 => app.settings.show_cpu_bar = !app.settings.show_cpu_bar,
+        15 => app.settings.show_mem_bar = !app.settings.show_mem_bar,
+        16 => app.settings.show_disk_bar = !app.settings.show_disk_bar,
+        17 => app.settings.show_network_bar = !app.settings.show_network_bar,
+        18 => app.settings.log_color = !app.settings.log_color,
+        _ => {}
+    }
+    app.settings.save();
+    if matches!(app.settings_selection, 14..=17) {
+        check_poll_all_hint(app);
+    }
+}
+
 /// Handle key input on the Settings page.
 fn handle_settings_key(app: &mut app::App, key: KeyCode) {
+    if app.settings_editing {
+        // Editing mode: Left/Right change value, Enter/Esc exit
+        match key {
+            KeyCode::Right => adjust_setting(app, true),
+            KeyCode::Left => adjust_setting(app, false),
+            KeyCode::Enter | KeyCode::Esc => {
+                app.settings_editing = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Navigation mode
     match key {
         KeyCode::Esc | KeyCode::Char('s') => {
-            // Return to previous page
-            app.page = app.previous_page.unwrap_or(Page::List);
+            app.settings_editing = false;
+            app.set_page(app.previous_page.unwrap_or(Page::List));
             app.previous_page = None;
         }
         KeyCode::Up => {
-            app.settings_selection = app.settings_selection.saturating_sub(1);
+            let (col, row) = settings_grid_pos(app.settings_selection);
+            if row > 0 {
+                app.settings_selection = settings_from_grid(col, row - 1);
+            }
         }
         KeyCode::Down => {
-            if app.settings_selection < settings::Settings::ROW_COUNT - 1 {
-                app.settings_selection += 1;
+            let (col, row) = settings_grid_pos(app.settings_selection);
+            let max_row = if col == 0 { LEFT_COL.len() - 1 } else { RIGHT_COL.len() - 1 };
+            if row < max_row {
+                app.settings_selection = settings_from_grid(col, row + 1);
+            }
+        }
+        KeyCode::Left => {
+            let (col, row) = settings_grid_pos(app.settings_selection);
+            if col == 1 {
+                app.settings_selection = settings_from_grid(0, row);
             }
         }
         KeyCode::Right => {
-            match app.settings_selection {
-                0 => app.settings.aggregation_mode = app.settings.aggregation_mode.next(),
-                1 => app.settings.aggregation_window.increment(),
-                2 => app.settings.theme = app.settings.theme.next(),
-                3 => app.settings.refresh_rate = app.settings.refresh_rate.next(),
-                4 => app.settings.log_buffer_size = app.settings.log_buffer_size.next(),
-                5 => {
-                    app.settings.poll_all_containers = !app.settings.poll_all_containers;
-                    if !app.settings.poll_all_containers {
-                        app.all_history.clear();
-                        app.all_stats.clear();
-                    }
-                }
-                6..=13 => app.settings.columns.toggle(app.settings_selection - 6),
-                14 => app.settings.show_cpu_bar = !app.settings.show_cpu_bar,
-                15 => app.settings.show_mem_bar = !app.settings.show_mem_bar,
-                16 => app.settings.show_disk_bar = !app.settings.show_disk_bar,
-                17 => app.settings.show_network_bar = !app.settings.show_network_bar,
-                _ => {}
+            let (col, row) = settings_grid_pos(app.settings_selection);
+            if col == 0 {
+                app.settings_selection = settings_from_grid(1, row);
             }
-            app.settings.save();
         }
-        KeyCode::Left => {
-            match app.settings_selection {
-                0 => app.settings.aggregation_mode = app.settings.aggregation_mode.prev(),
-                1 => app.settings.aggregation_window.decrement(),
-                2 => app.settings.theme = app.settings.theme.prev(),
-                3 => app.settings.refresh_rate = app.settings.refresh_rate.prev(),
-                4 => app.settings.log_buffer_size = app.settings.log_buffer_size.prev(),
-                5 => {
-                    app.settings.poll_all_containers = !app.settings.poll_all_containers;
-                    if !app.settings.poll_all_containers {
-                        app.all_history.clear();
-                        app.all_stats.clear();
-                    }
-                }
-                6..=13 => app.settings.columns.toggle(app.settings_selection - 6),
-                14 => app.settings.show_cpu_bar = !app.settings.show_cpu_bar,
-                15 => app.settings.show_mem_bar = !app.settings.show_mem_bar,
-                16 => app.settings.show_disk_bar = !app.settings.show_disk_bar,
-                17 => app.settings.show_network_bar = !app.settings.show_network_bar,
-                _ => {}
-            }
-            app.settings.save();
+        KeyCode::Enter => {
+            app.settings_editing = true;
         }
         _ => {}
     }
@@ -215,15 +295,31 @@ async fn run_loop(
     let mut last_tick = std::time::Instant::now();
 
     while app.running {
-        // Draw
+        // Force a full redraw when the page changes to prevent visual artifacts
+        if app.needs_clear {
+            terminal.clear()?;
+            app.needs_clear = false;
+        }
+
+        // Draw (synchronized update prevents tearing on modern terminals)
+        io::stdout().execute(BeginSynchronizedUpdate)?;
         terminal.draw(|f| ui::draw(f, app))?;
+        io::stdout().execute(EndSynchronizedUpdate)?;
 
         // Poll for input (non-blocking, 50ms timeout)
         let timeout = Duration::from_millis(50);
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                // Info popup takes priority when open
+                if app.info_popup.is_some() {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter => {
+                            app.info_popup = None;
+                        }
+                        _ => {}
+                    }
                 // Action menu takes priority when open
-                if app.action_menu.is_some() {
+                } else if app.action_menu.is_some() {
                     match key.code {
                         KeyCode::Esc => app.close_action_menu(),
                         KeyCode::Up => {
@@ -253,7 +349,7 @@ async fn run_loop(
                 } else if key.code == KeyCode::Char('s') && app.page != Page::Settings {
                     // Global 's' opens settings from any page
                     app.previous_page = Some(app.page);
-                    app.page = Page::Settings;
+                    app.set_page(Page::Settings);
                 } else {
                     match app.page {
                         Page::List => match key.code {
@@ -269,7 +365,7 @@ async fn run_loop(
                                     if let Some(docker) = docker {
                                         load_container_data(app, docker).await;
                                     }
-                                    app.page = Page::Detail;
+                                    app.set_page(Page::Detail);
                                 }
                             }
                             KeyCode::Left => {
@@ -278,17 +374,17 @@ async fn run_loop(
                                         load_container_data(app, docker).await;
                                     }
                                     app.auto_scroll = true;
-                                    app.page = Page::Logs;
+                                    app.set_page(Page::Logs);
                                 }
                             }
                             _ => {}
                         },
                         Page::Detail => match key.code {
                             KeyCode::Left => {
-                                app.page = Page::List;
+                                app.set_page(Page::List);
                             }
                             KeyCode::Right => {
-                                app.page = Page::Resources;
+                                app.set_page(Page::Resources);
                             }
                             KeyCode::Up => {
                                 app.detail_scroll = app.detail_scroll.saturating_sub(1);
@@ -317,10 +413,10 @@ async fn run_loop(
                         },
                         Page::Resources => match key.code {
                             KeyCode::Left => {
-                                app.page = Page::Detail;
+                                app.set_page(Page::Detail);
                             }
                             KeyCode::Right => {
-                                app.page = Page::Logs;
+                                app.set_page(Page::Logs);
                             }
                             KeyCode::Enter => {
                                 if app.selected_container_id().is_some() {
@@ -346,11 +442,11 @@ async fn run_loop(
                                 app.auto_scroll = !app.auto_scroll;
                             }
                             KeyCode::Left => {
-                                app.page = Page::Resources;
+                                app.set_page(Page::Resources);
                                 app.auto_scroll = true;
                             }
                             KeyCode::Right => {
-                                app.page = Page::List;
+                                app.set_page(Page::List);
                                 app.auto_scroll = true;
                             }
                             KeyCode::Up => {

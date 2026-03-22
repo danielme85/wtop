@@ -58,11 +58,41 @@ pub async fn fetch_logs(docker: &Docker, container_id: &str, tail: usize) -> Vec
             _ => continue,
         };
         for line in text.lines() {
-            lines.push(line.to_string());
+            lines.push(strip_ansi_and_control(line));
         }
     }
 
     lines
+}
+
+/// Strip ANSI escape sequences and control characters from a log line.
+fn strip_ansi_and_control(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC sequences: ESC [ ... final_byte  or  ESC followed by one char
+            if let Some(next) = chars.next() {
+                if next == '[' {
+                    // CSI sequence: consume until a letter or @ through ~
+                    for sc in chars.by_ref() {
+                        if sc.is_ascii_alphabetic() || ('@'..='~').contains(&sc) {
+                            break;
+                        }
+                    }
+                }
+                // OSC, single-char escape, etc.: already consumed the next char
+            }
+        } else if c == '\r' {
+            // Skip carriage returns
+        } else if c.is_control() && c != '\t' {
+            // Replace other control chars (except tab) with space
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Inspect a container and return static detail info (ports, volumes, env, etc.).
