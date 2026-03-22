@@ -46,11 +46,19 @@ cargo build --release
 
 ### Pre-built binary (Linux amd64 / arm64)
 
-Downloads the latest release — no authentication required:
+The quickest way to install. The [install script](https://github.com/danielme85/wtop/blob/main/remote-install.sh) auto-detects your architecture (amd64 or arm64), downloads the latest release binary from GitHub, and places it in `~/.local/bin` (or `~/bin`). No authentication required.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/danielme85/wtop/main/remote-install.sh | sh
 ```
+
+You can override the install location with `INSTALL_DIR`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/danielme85/wtop/main/remote-install.sh | INSTALL_DIR=/usr/local/bin sh
+```
+
+Or if you prefer to download manually, grab the binary for your platform from the [Releases page](https://github.com/danielme85/wtop/releases).
 
 ### Docker
 
