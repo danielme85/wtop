@@ -1,0 +1,15 @@
+[package]
+name = "wtop"
+version = "0.1.0"
+edition = "2021"
+description = "A nimble, asynchronous Docker container monitor TUI"
+
+[dependencies]
+bollard = "0.18"
+crossterm = "0.28"
+ratatui = "0.29"
+futures-util = "0.3"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
