@@ -9,7 +9,10 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
+    LeaveAlternateScreen,
+};
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -154,73 +157,131 @@ fn check_poll_all_hint(app: &mut app::App) {
     }
 }
 
+/// Settings grid layout.
+/// Left column:  General (0-5), Logs (18)      → 7 rows
+/// Right column: Columns (6-13), Mini Bars (14-17) → 12 rows
+///
+/// Grid is addressed as (column, row_within_column).
+/// These helpers convert between the flat selection index and grid position.
+/// Left-column flat indices in display order.
+const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 18];
+/// Right-column flat indices in display order.
+const RIGHT_COL: &[usize] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+
+fn settings_grid_pos(sel: usize) -> (usize, usize) {
+    // (column, row_within_column)
+    if let Some(row) = LEFT_COL.iter().position(|&i| i == sel) {
+        (0, row)
+    } else if let Some(row) = RIGHT_COL.iter().position(|&i| i == sel) {
+        (1, row)
+    } else {
+        (0, 0)
+    }
+}
+
+fn settings_from_grid(col: usize, row: usize) -> usize {
+    if col == 0 {
+        LEFT_COL[row.min(LEFT_COL.len() - 1)]
+    } else {
+        RIGHT_COL[row.min(RIGHT_COL.len() - 1)]
+    }
+}
+
+/// Adjust a setting value (next/prev).
+fn adjust_setting(app: &mut app::App, forward: bool) {
+    match app.settings_selection {
+        0 => app.settings.aggregation_mode = if forward {
+            app.settings.aggregation_mode.next()
+        } else {
+            app.settings.aggregation_mode.prev()
+        },
+        1 => if forward { app.settings.aggregation_window.increment() }
+             else { app.settings.aggregation_window.decrement() },
+        2 => app.settings.theme = if forward {
+            app.settings.theme.next()
+        } else {
+            app.settings.theme.prev()
+        },
+        3 => app.settings.refresh_rate = if forward {
+            app.settings.refresh_rate.next()
+        } else {
+            app.settings.refresh_rate.prev()
+        },
+        4 => app.settings.log_buffer_size = if forward {
+            app.settings.log_buffer_size.next()
+        } else {
+            app.settings.log_buffer_size.prev()
+        },
+        5 => {
+            app.settings.poll_all_containers = !app.settings.poll_all_containers;
+            if !app.settings.poll_all_containers {
+                app.all_history.clear();
+                app.all_stats.clear();
+            }
+        }
+        6..=13 => app.settings.columns.toggle(app.settings_selection - 6),
+        14 => app.settings.show_cpu_bar = !app.settings.show_cpu_bar,
+        15 => app.settings.show_mem_bar = !app.settings.show_mem_bar,
+        16 => app.settings.show_disk_bar = !app.settings.show_disk_bar,
+        17 => app.settings.show_network_bar = !app.settings.show_network_bar,
+        18 => app.settings.log_color = !app.settings.log_color,
+        _ => {}
+    }
+    app.settings.save();
+    if matches!(app.settings_selection, 14..=17) {
+        check_poll_all_hint(app);
+    }
+}
+
 /// Handle key input on the Settings page.
 fn handle_settings_key(app: &mut app::App, key: KeyCode) {
+    if app.settings_editing {
+        // Editing mode: Left/Right change value, Enter/Esc exit
+        match key {
+            KeyCode::Right => adjust_setting(app, true),
+            KeyCode::Left => adjust_setting(app, false),
+            KeyCode::Enter | KeyCode::Esc => {
+                app.settings_editing = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Navigation mode
     match key {
         KeyCode::Esc | KeyCode::Char('s') => {
-            // Return to previous page
+            app.settings_editing = false;
             app.set_page(app.previous_page.unwrap_or(Page::List));
             app.previous_page = None;
         }
         KeyCode::Up => {
-            app.settings_selection = app.settings_selection.saturating_sub(1);
+            let (col, row) = settings_grid_pos(app.settings_selection);
+            if row > 0 {
+                app.settings_selection = settings_from_grid(col, row - 1);
+            }
         }
         KeyCode::Down => {
-            if app.settings_selection < settings::Settings::ROW_COUNT - 1 {
-                app.settings_selection += 1;
-            }
-        }
-        KeyCode::Right => {
-            match app.settings_selection {
-                0 => app.settings.aggregation_mode = app.settings.aggregation_mode.next(),
-                1 => app.settings.aggregation_window.increment(),
-                2 => app.settings.theme = app.settings.theme.next(),
-                3 => app.settings.refresh_rate = app.settings.refresh_rate.next(),
-                4 => app.settings.log_buffer_size = app.settings.log_buffer_size.next(),
-                5 => {
-                    app.settings.poll_all_containers = !app.settings.poll_all_containers;
-                    if !app.settings.poll_all_containers {
-                        app.all_history.clear();
-                        app.all_stats.clear();
-                    }
-                }
-                6..=13 => app.settings.columns.toggle(app.settings_selection - 6),
-                14 => app.settings.show_cpu_bar = !app.settings.show_cpu_bar,
-                15 => app.settings.show_mem_bar = !app.settings.show_mem_bar,
-                16 => app.settings.show_disk_bar = !app.settings.show_disk_bar,
-                17 => app.settings.show_network_bar = !app.settings.show_network_bar,
-                _ => {}
-            }
-            app.settings.save();
-            if matches!(app.settings_selection, 14..=17) {
-                check_poll_all_hint(app);
+            let (col, row) = settings_grid_pos(app.settings_selection);
+            let max_row = if col == 0 { LEFT_COL.len() - 1 } else { RIGHT_COL.len() - 1 };
+            if row < max_row {
+                app.settings_selection = settings_from_grid(col, row + 1);
             }
         }
         KeyCode::Left => {
-            match app.settings_selection {
-                0 => app.settings.aggregation_mode = app.settings.aggregation_mode.prev(),
-                1 => app.settings.aggregation_window.decrement(),
-                2 => app.settings.theme = app.settings.theme.prev(),
-                3 => app.settings.refresh_rate = app.settings.refresh_rate.prev(),
-                4 => app.settings.log_buffer_size = app.settings.log_buffer_size.prev(),
-                5 => {
-                    app.settings.poll_all_containers = !app.settings.poll_all_containers;
-                    if !app.settings.poll_all_containers {
-                        app.all_history.clear();
-                        app.all_stats.clear();
-                    }
-                }
-                6..=13 => app.settings.columns.toggle(app.settings_selection - 6),
-                14 => app.settings.show_cpu_bar = !app.settings.show_cpu_bar,
-                15 => app.settings.show_mem_bar = !app.settings.show_mem_bar,
-                16 => app.settings.show_disk_bar = !app.settings.show_disk_bar,
-                17 => app.settings.show_network_bar = !app.settings.show_network_bar,
-                _ => {}
+            let (col, row) = settings_grid_pos(app.settings_selection);
+            if col == 1 {
+                app.settings_selection = settings_from_grid(0, row);
             }
-            app.settings.save();
-            if matches!(app.settings_selection, 14..=17) {
-                check_poll_all_hint(app);
+        }
+        KeyCode::Right => {
+            let (col, row) = settings_grid_pos(app.settings_selection);
+            if col == 0 {
+                app.settings_selection = settings_from_grid(1, row);
             }
+        }
+        KeyCode::Enter => {
+            app.settings_editing = true;
         }
         _ => {}
     }
@@ -240,8 +301,10 @@ async fn run_loop(
             app.needs_clear = false;
         }
 
-        // Draw
+        // Draw (synchronized update prevents tearing on modern terminals)
+        io::stdout().execute(BeginSynchronizedUpdate)?;
         terminal.draw(|f| ui::draw(f, app))?;
+        io::stdout().execute(EndSynchronizedUpdate)?;
 
         // Poll for input (non-blocking, 50ms timeout)
         let timeout = Duration::from_millis(50);

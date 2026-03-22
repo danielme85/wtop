@@ -358,8 +358,10 @@ pub struct App {
     pub status_message: Option<(String, std::time::Instant)>,
     /// User settings (persisted to disk).
     pub settings: Settings,
-    /// Which row is selected in the Settings page.
+    /// Which setting is selected (flat index).
     pub settings_selection: usize,
+    /// Whether a setting value is being edited (Enter to toggle).
+    pub settings_editing: bool,
     /// Page to return to when leaving Settings.
     pub previous_page: Option<Page>,
     /// Per-container stats history (keyed by container ID), used when poll_all is on.
@@ -391,6 +393,7 @@ impl App {
             status_message: None,
             settings,
             settings_selection: 0,
+            settings_editing: false,
             previous_page: None,
             all_history: HashMap::new(),
             all_stats: HashMap::new(),

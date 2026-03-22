@@ -138,26 +138,30 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
     let help_text = match app.page {
         Page::List => {
             if app.containers.is_empty() {
-                "s: settings  q: quit".to_string()
+                "s: Settings  q: Quit".to_string()
             } else {
-                "Left/Right: navigate  Up/Down: select  Enter: actions  s: settings  q: quit".to_string()
+                "Left/Right: Navigate  Up/Down: Select  Enter: Actions  s: Settings  q: Quit".to_string()
             }
         }
         Page::Detail => {
-            "Left/Right: navigate  Up/Down: scroll  Enter: actions  PgUp/PgDn: container  s: settings  q: quit".to_string()
+            "Left/Right: Navigate  Up/Down: Scroll  Enter: Actions  PgUp/PgDn: Container  s: Settings  q: Quit".to_string()
         }
         Page::Resources => {
-            "Left/Right: navigate  Enter: actions  PgUp/PgDn: container  s: settings  q: quit".to_string()
+            "Left/Right: Navigate  Enter: Actions  PgUp/PgDn: Container  s: Settings  q: Quit".to_string()
         }
         Page::Logs => {
             let scroll_indicator = if app.auto_scroll { "ON" } else { "OFF" };
             format!(
-                "Left/Right: navigate  Up/Down: scroll  Enter: actions  PgUp/PgDn: container  a: auto-scroll [{}]  s: settings  q: quit",
+                "Left/Right: Navigate  Up/Down: Scroll  Enter: Actions  PgUp/PgDn: Container  a: Auto-scroll [{}]  s: Settings  q: Quit",
                 scroll_indicator
             )
         }
         Page::Settings => {
-            "Up/Down: navigate  Left/Right: change value  Esc/s: back  q: quit".to_string()
+            if app.settings_editing {
+                "Left/Right: Change Value  Enter/Esc: Done".to_string()
+            } else {
+                "Arrows: Navigate  Enter: Edit  Esc/s: Back  q: Quit".to_string()
+            }
         }
     };
 
@@ -502,7 +506,19 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
             )));
         } else {
             for e in &d.env {
-                lines.push(detail_line("  ", e, theme));
+                if let Some((name, value)) = e.split_once('=') {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            format!("  {}=", name),
+                            Style::default()
+                                .fg(theme.title)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(value.to_string(), Style::default().fg(theme.text)),
+                    ]));
+                } else {
+                    lines.push(detail_line("  ", e, theme));
+                }
             }
         }
     } else {
@@ -810,6 +826,55 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
     frame.render_widget(net_tx_spark, net_cols[1]);
 }
 
+/// Detected log level for a line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+    None,
+}
+
+/// Detect log level from a line by scanning for common keywords.
+fn detect_log_level(line: &str) -> LogLevel {
+    // Scan only the first ~120 chars (level keywords appear early in the line)
+    let prefix: &str = if line.len() > 120 { &line[..120] } else { line };
+    let upper = prefix.to_ascii_uppercase();
+
+    // Check for common level patterns: "ERROR", "ERR", "FATAL", "PANIC",
+    // "WARN", "WARNING", "INFO", "DEBUG", "DBG", "TRACE", "TRC"
+    // Use word-boundary-aware matching to avoid false positives like "INFORMATION"
+    for token in upper.split(|c: char| !c.is_ascii_alphanumeric()) {
+        match token {
+            "ERROR" | "ERR" | "FATAL" | "PANIC" | "CRITICAL" | "CRIT" => return LogLevel::Error,
+            "WARN" | "WARNING" => return LogLevel::Warn,
+            "INFO" => return LogLevel::Info,
+            "DEBUG" | "DBG" => return LogLevel::Debug,
+            "TRACE" | "TRC" => return LogLevel::Trace,
+            _ => {}
+        }
+    }
+    LogLevel::None
+}
+
+/// Color a log line based on its detected level.
+fn highlight_log_line<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
+    let level = detect_log_level(line);
+
+    let color = match level {
+        LogLevel::Error => Color::Rgb(231, 76, 60),   // red
+        LogLevel::Warn => Color::Rgb(230, 180, 40),   // yellow/amber
+        LogLevel::Info => theme.running,               // green
+        LogLevel::Debug => theme.cyan,                 // blue
+        LogLevel::Trace => theme.dim,                  // dim/gray
+        LogLevel::None => theme.text,                  // default
+    };
+
+    Line::from(Span::styled(line, Style::default().fg(color)))
+}
+
 fn draw_logs(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::layout::Rect) {
     let container_name = app
         .containers
@@ -822,7 +887,13 @@ fn draw_logs(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::lay
     let mut lines: Vec<Line> = app
         .logs
         .iter()
-        .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(theme.text))))
+        .map(|l| {
+            if app.settings.log_color {
+                highlight_log_line(l.as_str(), theme)
+            } else {
+                Line::from(Span::styled(l.as_str(), Style::default().fg(theme.text)))
+            }
+        })
         .collect();
 
     // When auto-scrolling, add padding so the last log line isn't flush
@@ -991,7 +1062,7 @@ fn draw_info_popup(frame: &mut Frame, app: &App, theme: &Theme) {
         .collect();
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        " Press Esc to dismiss ",
+        " Press Esc to Dismiss ",
         Style::default().fg(theme.dim),
     )));
 
@@ -999,12 +1070,65 @@ fn draw_info_popup(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(paragraph, inner);
 }
 
+/// Render a single settings row (label + value selector).
+fn settings_row<'a>(label: &str, value: &str, selected: bool, editing: bool, theme: &Theme) -> Line<'a> {
+    let value_display = if editing {
+        format!(" ◀ {} ▶ ", value)
+    } else {
+        format!("   {}   ", value)
+    };
+    if selected && editing {
+        // Editing: bright highlight on value, arrows shown
+        Line::from(vec![
+            Span::styled(
+                format!(" {} ", label),
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                value_display,
+                Style::default()
+                    .fg(theme.bg)
+                    .bg(theme.title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else if selected {
+        // Selected but not editing: subtle highlight
+        Line::from(vec![
+            Span::styled(
+                format!(" {} ", label),
+                Style::default()
+                    .fg(theme.title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                value_display,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(theme.border)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(format!(" {} ", label), Style::default().fg(theme.text)),
+            Span::styled(value_display, Style::default().fg(theme.dim)),
+        ])
+    }
+}
+
 fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layout::Rect) {
     use crate::settings::ColumnVisibility;
 
     let on_off = |v: bool| if v { "On" } else { "Off" };
+    let sel = app.settings_selection;
+    let editing = app.settings_editing;
 
-    let mut settings_rows: Vec<(&str, String)> = vec![
+    // ── Build data for each section ──
+
+    let general: Vec<(&str, String)> = vec![
         ("Aggregation Mode", app.settings.aggregation_mode.label().to_string()),
         ("Aggregation Window", app.settings.aggregation_window.label()),
         ("Color Theme", app.settings.theme.label().to_string()),
@@ -1013,99 +1137,113 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         ("Poll All Containers", on_off(app.settings.poll_all_containers).to_string()),
     ];
 
-    // Column visibility toggles
+    let logs: Vec<(&str, String)> = vec![
+        ("Log Colors", on_off(app.settings.log_color).to_string()),
+    ];
+
+    let mut columns: Vec<(&str, String)> = Vec::new();
     for i in 0..ColumnVisibility::COUNT {
-        settings_rows.push((
+        columns.push((
             ColumnVisibility::column_label(i),
             on_off(app.settings.columns.is_visible(i)).to_string(),
         ));
     }
 
-    // Mini bar toggles
-    settings_rows.push(("Bar: CPU", on_off(app.settings.show_cpu_bar).to_string()));
-    settings_rows.push(("Bar: MEM", on_off(app.settings.show_mem_bar).to_string()));
-    settings_rows.push(("Bar: Disk", on_off(app.settings.show_disk_bar).to_string()));
-    settings_rows.push(("Bar: Network", on_off(app.settings.show_network_bar).to_string()));
+    let bars: Vec<(&str, String)> = vec![
+        ("CPU", on_off(app.settings.show_cpu_bar).to_string()),
+        ("MEM", on_off(app.settings.show_mem_bar).to_string()),
+        ("Disk", on_off(app.settings.show_disk_bar).to_string()),
+        ("Network", on_off(app.settings.show_network_bar).to_string()),
+    ];
 
-    let block = content_block("Settings", theme);
-    let inner_height = block.inner(area).height as usize;
+    // ── Layout: outer block, then two columns ──
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::default());
+    let outer = content_block("Settings", theme);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
 
-    for (i, (label, value)) in settings_rows.iter().enumerate() {
-        // Add section separators
-        if i == 6 {
-            lines.push(Line::from(Span::styled(
-                "  ── Container List ──".to_string(),
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::default());
-        }
-        if i == 14 {
-            lines.push(Line::from(Span::styled(
-                "  ── Mini Bars ──".to_string(),
-                Style::default()
-                    .fg(theme.border)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::default());
-        }
+    let col_layout =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
 
-        let is_selected = i == app.settings_selection;
-        let value_display = format!("  < {} >  ", value);
+    // ── Left column: General + Logs ──
+    // Compute heights: each section needs rows + 2 (border)
+    let general_h = general.len() as u16 + 2;
+    let logs_h = logs.len() as u16 + 2;
+    let left_sections = Layout::vertical([
+        Constraint::Length(general_h),
+        Constraint::Length(logs_h),
+        Constraint::Min(0),
+    ])
+    .split(col_layout[0]);
 
-        if is_selected {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {} ", label),
-                    Style::default()
-                        .fg(theme.title)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    value_display,
-                    Style::default()
-                        .fg(Color::White)
-                        .bg(theme.border)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-        } else {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {} ", label),
-                    Style::default().fg(theme.text),
-                ),
-                Span::styled(
-                    value_display,
-                    Style::default().fg(theme.dim),
-                ),
-            ]));
-        }
-        lines.push(Line::default());
-    }
+    // General box
+    let general_block = spark_block("General", theme);
+    let general_inner = general_block.inner(left_sections[0]);
+    frame.render_widget(general_block, left_sections[0]);
 
-    // Auto-scroll to keep selected row visible
-    // Each settings row takes 2 lines (content + blank), plus header blank + section separators
-    let separators = if app.settings_selection >= 14 {
-        4 // two separators (2 lines each)
-    } else if app.settings_selection >= 6 {
-        2 // one separator
-    } else {
-        0
-    };
-    let selected_line = 1 + app.settings_selection * 2 + separators;
-    let scroll = if selected_line + 2 > inner_height {
-        (selected_line + 2 - inner_height) as u16
-    } else {
-        0
-    };
+    let general_lines: Vec<Line> = general
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let is_sel = sel == i;
+            settings_row(label, value, is_sel, is_sel && editing, theme)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(general_lines), general_inner);
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((scroll, 0));
-    frame.render_widget(paragraph, area);
+    // Logs box
+    let logs_block = spark_block("Logs", theme);
+    let logs_inner = logs_block.inner(left_sections[1]);
+    frame.render_widget(logs_block, left_sections[1]);
+
+    let logs_lines: Vec<Line> = logs
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let is_sel = sel == 18 + i;
+            settings_row(label, value, is_sel, is_sel && editing, theme)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(logs_lines), logs_inner);
+
+    // ── Right column: Columns + Mini Bars ──
+    let columns_h = columns.len() as u16 + 2;
+    let bars_h = bars.len() as u16 + 2;
+    let right_sections = Layout::vertical([
+        Constraint::Length(columns_h),
+        Constraint::Length(bars_h),
+        Constraint::Min(0),
+    ])
+    .split(col_layout[1]);
+
+    // Columns box
+    let columns_block = spark_block("Columns", theme);
+    let columns_inner = columns_block.inner(right_sections[0]);
+    frame.render_widget(columns_block, right_sections[0]);
+
+    let columns_lines: Vec<Line> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let short = label.strip_prefix("Column: ").unwrap_or(label);
+            let is_sel = sel == 6 + i;
+            settings_row(short, value, is_sel, is_sel && editing, theme)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(columns_lines), columns_inner);
+
+    // Mini Bars box
+    let bars_block = spark_block("Mini Bars", theme);
+    let bars_inner = bars_block.inner(right_sections[1]);
+    frame.render_widget(bars_block, right_sections[1]);
+
+    let bars_lines: Vec<Line> = bars
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let is_sel = sel == 14 + i;
+            settings_row(label, value, is_sel, is_sel && editing, theme)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(bars_lines), bars_inner);
 }
