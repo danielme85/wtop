@@ -141,6 +141,19 @@ async fn handle_action(
     }
 }
 
+/// Check if any mini bar is enabled without poll_all_containers and show a hint.
+fn check_poll_all_hint(app: &mut app::App) {
+    let any_bar = app.settings.show_cpu_bar
+        || app.settings.show_mem_bar
+        || app.settings.show_disk_bar
+        || app.settings.show_network_bar;
+    if any_bar && !app.settings.poll_all_containers {
+        app.info_popup = Some(
+            "To use performance indicators on the container overview page you have to enable \"Poll All Containers\".".to_string()
+        );
+    }
+}
+
 /// Handle key input on the Settings page.
 fn handle_settings_key(app: &mut app::App, key: KeyCode) {
     match key {
@@ -179,6 +192,9 @@ fn handle_settings_key(app: &mut app::App, key: KeyCode) {
                 _ => {}
             }
             app.settings.save();
+            if matches!(app.settings_selection, 14..=17) {
+                check_poll_all_hint(app);
+            }
         }
         KeyCode::Left => {
             match app.settings_selection {
@@ -202,6 +218,9 @@ fn handle_settings_key(app: &mut app::App, key: KeyCode) {
                 _ => {}
             }
             app.settings.save();
+            if matches!(app.settings_selection, 14..=17) {
+                check_poll_all_hint(app);
+            }
         }
         _ => {}
     }
@@ -228,8 +247,16 @@ async fn run_loop(
         let timeout = Duration::from_millis(50);
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                // Info popup takes priority when open
+                if app.info_popup.is_some() {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter => {
+                            app.info_popup = None;
+                        }
+                        _ => {}
+                    }
                 // Action menu takes priority when open
-                if app.action_menu.is_some() {
+                } else if app.action_menu.is_some() {
                     match key.code {
                         KeyCode::Esc => app.close_action_menu(),
                         KeyCode::Up => {

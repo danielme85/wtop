@@ -38,6 +38,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.action_menu.is_some() {
         draw_action_menu(frame, app, &theme);
     }
+
+    // Info popup (rendered on top of everything)
+    if app.info_popup.is_some() {
+        draw_info_popup(frame, app, &theme);
+    }
 }
 
 fn content_block<'a>(title: &str, theme: &Theme) -> Block<'a> {
@@ -925,6 +930,70 @@ fn draw_action_menu(frame: &mut Frame, app: &App, theme: &Theme) {
             }
         })
         .collect();
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
+fn draw_info_popup(frame: &mut Frame, app: &App, theme: &Theme) {
+    let msg = match app.info_popup {
+        Some(ref m) => m,
+        None => return,
+    };
+
+    // Word-wrap the message to fit the popup width
+    let max_text_width = 40usize;
+    let mut wrapped_lines: Vec<String> = Vec::new();
+    for line in msg.lines() {
+        let mut current = String::new();
+        for word in line.split_whitespace() {
+            if current.is_empty() {
+                current = word.to_string();
+            } else if current.len() + 1 + word.len() > max_text_width {
+                wrapped_lines.push(current);
+                current = word.to_string();
+            } else {
+                current.push(' ');
+                current.push_str(word);
+            }
+        }
+        wrapped_lines.push(current);
+    }
+
+    let popup_width = (max_text_width + 4) as u16; // padding + borders
+    let popup_height = wrapped_lines.len() as u16 + 4; // borders + blank line + dismiss hint
+
+    let area = frame.area();
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = ratatui::layout::Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Info ",
+            Style::default()
+                .fg(theme.title)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.bg));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let mut lines: Vec<Line> = wrapped_lines
+        .iter()
+        .map(|l| Line::from(Span::styled(format!(" {} ", l), Style::default().fg(theme.text))))
+        .collect();
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " Press Esc to dismiss ",
+        Style::default().fg(theme.dim),
+    )));
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);

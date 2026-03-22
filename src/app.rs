@@ -368,6 +368,8 @@ pub struct App {
     pub all_stats: HashMap<String, ContainerStats>,
     /// Set to true when the page changes to force a full terminal redraw.
     pub needs_clear: bool,
+    /// Informational popup message (dismissed with Esc/Enter).
+    pub info_popup: Option<String>,
 }
 
 impl App {
@@ -393,6 +395,7 @@ impl App {
             all_history: HashMap::new(),
             all_stats: HashMap::new(),
             needs_clear: false,
+            info_popup: None,
         }
     }
 
