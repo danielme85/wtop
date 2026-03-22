@@ -6,6 +6,7 @@ mod theme;
 mod ui;
 
 use std::io;
+use std::process::Command;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode};
@@ -127,6 +128,12 @@ async fn handle_action(
         .map(|c| c.name.clone())
         .unwrap_or_default();
 
+    // Exec is handled separately in run_loop (needs terminal access)
+    if action == ContainerAction::Exec {
+        app.pending_exec = Some(id);
+        return;
+    }
+
     let result = match action {
         ContainerAction::Start => docker_client::start_container(docker, &id).await,
         ContainerAction::Stop => docker_client::stop_container(docker, &id).await,
@@ -135,7 +142,9 @@ async fn handle_action(
         ContainerAction::Unpause => docker_client::unpause_container(docker, &id).await,
         ContainerAction::Kill => docker_client::kill_container(docker, &id).await,
         ContainerAction::Remove => docker_client::remove_container(docker, &id).await,
-        ContainerAction::Details | ContainerAction::Logs => unreachable!(),
+        ContainerAction::Details | ContainerAction::Logs | ContainerAction::Exec => {
+            unreachable!()
+        }
     };
 
     match result {
@@ -340,6 +349,35 @@ async fn run_loop(
                             app.close_action_menu();
                             if let Some(action) = action {
                                 handle_action(app, docker, action).await;
+                            }
+                            // Handle exec: suspend TUI, spawn interactive shell, resume
+                            if let Some(container_id) = app.pending_exec.take() {
+                                terminal::disable_raw_mode()?;
+                                io::stdout().execute(LeaveAlternateScreen)?;
+                                terminal.show_cursor()?;
+
+                                let status = Command::new("docker")
+                                    .args(["exec", "-it", &container_id, "sh"])
+                                    .status();
+
+                                match status {
+                                    Ok(s) if s.success() => {
+                                        app.set_status("Exec: exited shell".to_string());
+                                    }
+                                    Ok(s) => {
+                                        app.set_status(format!(
+                                            "Exec: shell exited with {}",
+                                            s.code().unwrap_or(-1)
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        app.set_status(format!("Exec error: {}", e));
+                                    }
+                                }
+
+                                terminal::enable_raw_mode()?;
+                                io::stdout().execute(EnterAlternateScreen)?;
+                                app.needs_clear = true;
                             }
                         }
                         _ => {}
