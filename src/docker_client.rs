@@ -22,16 +22,24 @@ pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
     match docker.list_containers(Some(options)).await {
         Ok(containers) => containers
             .into_iter()
-            .map(|c| ContainerInfo {
-                id: c.id.unwrap_or_default().chars().take(12).collect(),
-                name: c
-                    .names
-                    .and_then(|n| n.first().cloned())
-                    .unwrap_or_default()
-                    .trim_start_matches('/')
-                    .to_string(),
-                image: c.image.unwrap_or_default(),
-                status: c.status.unwrap_or_default(),
+            .map(|c| {
+                let compose_project = c
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get("com.docker.compose.project"))
+                    .cloned();
+                ContainerInfo {
+                    id: c.id.unwrap_or_default().chars().take(12).collect(),
+                    name: c
+                        .names
+                        .and_then(|n| n.first().cloned())
+                        .unwrap_or_default()
+                        .trim_start_matches('/')
+                        .to_string(),
+                    image: c.image.unwrap_or_default(),
+                    status: c.status.unwrap_or_default(),
+                    compose_project,
+                }
             })
             .collect(),
         Err(_) => Vec::new(),

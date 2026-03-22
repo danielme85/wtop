@@ -14,6 +14,7 @@ pub struct ContainerInfo {
     pub name: String,
     pub image: String,
     pub status: String,
+    pub compose_project: Option<String>,
 }
 
 /// Static container information from docker inspect (does not change while running).

@@ -9,6 +9,7 @@ use ratatui::Frame;
 
 use crate::aggregation;
 use crate::app::{App, Page};
+use crate::settings::SortBy;
 use crate::theme::Theme;
 
 /// Draw the entire TUI frame (stateless, immediate-mode).
@@ -140,7 +141,10 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
             if app.containers.is_empty() {
                 "s: Settings  q: Quit".to_string()
             } else {
-                "Left/Right: Navigate  Up/Down: Select  Enter: Actions  s: Settings  q: Quit".to_string()
+                format!(
+                    "Left/Right: Navigate  Up/Down: Select  Enter: Actions  Tab: Sort [{}]  s: Settings  q: Quit",
+                    app.settings.sort_by.label()
+                )
             }
         }
         Page::Detail => {
@@ -249,12 +253,43 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
     }
 
     let header_row = Row::new(headers).height(1);
+    let col_count = constraints.len();
 
-    let rows: Vec<Row> = app
-        .containers
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut last_project: Option<Option<&str>> = None;
+
+    for (i, c) in app.containers.iter().enumerate() {
+        // Insert compose project group header when sorting by compose project
+        if app.settings.sort_by == SortBy::ComposeProject {
+            let current_project = c.compose_project.as_deref();
+            let show_header = match last_project {
+                None => true,
+                Some(ref prev) => *prev != current_project,
+            };
+            if show_header {
+                let label = current_project.unwrap_or("(no project)");
+                let sep_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
+                let mut header_cells: Vec<Cell> = Vec::with_capacity(col_count);
+                // Fill each column: put "──" in the narrow status col,
+                // and the project name in the first flexible column.
+                let mut label_placed = false;
+                // Status indicator column
+                header_cells.push(Cell::from("──").style(sep_style));
+                // Remaining columns
+                for _ in 1..(col_count) {
+                    if !label_placed {
+                        header_cells.push(Cell::from(format!("── {} ──", label)).style(sep_style));
+                        label_placed = true;
+                    } else {
+                        header_cells.push(Cell::from(""));
+                    }
+                }
+                rows.push(Row::new(header_cells));
+                last_project = Some(current_project);
+            }
+        }
+
+        {
             let is_selected = i == app.selected;
             let status_style = if c.status.contains("Up") {
                 Style::default().fg(theme.running)
@@ -388,9 +423,9 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                 }
             }
 
-            Row::new(cells)
-        })
-        .collect();
+            rows.push(Row::new(cells));
+        }
+    }
 
     let table = Table::new(rows, constraints)
         .header(header_row)
@@ -1137,6 +1172,10 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         ("Poll All Containers", on_off(app.settings.poll_all_containers).to_string()),
     ];
 
+    let sorting: Vec<(&str, String)> = vec![
+        ("Sort By", app.settings.sort_by.label().to_string()),
+    ];
+
     let logs: Vec<(&str, String)> = vec![
         ("Log Colors", on_off(app.settings.log_color).to_string()),
     ];
@@ -1165,12 +1204,14 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     let col_layout =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
 
-    // ── Left column: General + Logs ──
+    // ── Left column: General + Sorting + Logs ──
     // Compute heights: each section needs rows + 2 (border)
     let general_h = general.len() as u16 + 2;
+    let sorting_h = sorting.len() as u16 + 2;
     let logs_h = logs.len() as u16 + 2;
     let left_sections = Layout::vertical([
         Constraint::Length(general_h),
+        Constraint::Length(sorting_h),
         Constraint::Length(logs_h),
         Constraint::Min(0),
     ])
@@ -1191,10 +1232,25 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .collect();
     frame.render_widget(Paragraph::new(general_lines), general_inner);
 
+    // Sorting box
+    let sorting_block = spark_block("Sorting", theme);
+    let sorting_inner = sorting_block.inner(left_sections[1]);
+    frame.render_widget(sorting_block, left_sections[1]);
+
+    let sorting_lines: Vec<Line> = sorting
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let is_sel = sel == 19 + i;
+            settings_row(label, value, is_sel, is_sel && editing, theme)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(sorting_lines), sorting_inner);
+
     // Logs box
     let logs_block = spark_block("Logs", theme);
-    let logs_inner = logs_block.inner(left_sections[1]);
-    frame.render_widget(logs_block, left_sections[1]);
+    let logs_inner = logs_block.inner(left_sections[2]);
+    frame.render_widget(logs_block, left_sections[2]);
 
     let logs_lines: Vec<Line> = logs
         .iter()

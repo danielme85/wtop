@@ -308,6 +308,57 @@ impl ColumnVisibility {
     pub const COUNT: usize = 8;
 }
 
+/// Sort order for the container list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SortBy {
+    #[default]
+    Name,
+    Status,
+    Cpu,
+    Memory,
+    Disk,
+    Network,
+    ComposeProject,
+}
+
+impl SortBy {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortBy::Name => "Name",
+            SortBy::Status => "Status",
+            SortBy::Cpu => "CPU",
+            SortBy::Memory => "Memory",
+            SortBy::Disk => "Disk",
+            SortBy::Network => "Network",
+            SortBy::ComposeProject => "Compose Project",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            SortBy::Name => SortBy::Status,
+            SortBy::Status => SortBy::Cpu,
+            SortBy::Cpu => SortBy::Memory,
+            SortBy::Memory => SortBy::Disk,
+            SortBy::Disk => SortBy::Network,
+            SortBy::Network => SortBy::ComposeProject,
+            SortBy::ComposeProject => SortBy::Name,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            SortBy::Name => SortBy::ComposeProject,
+            SortBy::Status => SortBy::Name,
+            SortBy::Cpu => SortBy::Status,
+            SortBy::Memory => SortBy::Cpu,
+            SortBy::Disk => SortBy::Memory,
+            SortBy::Network => SortBy::Disk,
+            SortBy::ComposeProject => SortBy::Network,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub aggregation_mode: AggregationMode,
@@ -329,6 +380,8 @@ pub struct Settings {
     pub show_network_bar: bool,
     #[serde(default = "default_true")]
     pub log_color: bool,
+    #[serde(default)]
+    pub sort_by: SortBy,
 }
 
 fn default_true() -> bool {
@@ -350,6 +403,7 @@ impl Default for Settings {
             show_disk_bar: false,
             show_network_bar: false,
             log_color: true,
+            sort_by: SortBy::default(),
         }
     }
 }

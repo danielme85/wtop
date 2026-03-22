@@ -18,7 +18,8 @@ use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use app::{ContainerAction, Page};
+use app::{ContainerAction, ContainerInfo, Page};
+use settings::SortBy;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -173,7 +174,7 @@ fn check_poll_all_hint(app: &mut app::App) {
 /// Grid is addressed as (column, row_within_column).
 /// These helpers convert between the flat selection index and grid position.
 /// Left-column flat indices in display order.
-const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 18];
+const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 19, 18];
 /// Right-column flat indices in display order.
 const RIGHT_COL: &[usize] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
 
@@ -234,6 +235,11 @@ fn adjust_setting(app: &mut app::App, forward: bool) {
         16 => app.settings.show_disk_bar = !app.settings.show_disk_bar,
         17 => app.settings.show_network_bar = !app.settings.show_network_bar,
         18 => app.settings.log_color = !app.settings.log_color,
+        19 => app.settings.sort_by = if forward {
+            app.settings.sort_by.next()
+        } else {
+            app.settings.sort_by.prev()
+        },
         _ => {}
     }
     app.settings.save();
@@ -296,6 +302,49 @@ fn handle_settings_key(app: &mut app::App, key: KeyCode) {
     }
 }
 
+/// Sort the container list according to the current sort setting.
+fn sort_containers(containers: &mut [ContainerInfo], sort_by: SortBy, all_stats: &std::collections::HashMap<String, app::ContainerStats>) {
+    match sort_by {
+        SortBy::Name => containers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        SortBy::Status => containers.sort_by(|a, b| {
+            // Running first, then paused, then stopped
+            fn status_rank(s: &str) -> u8 {
+                if s.contains("Up") && !s.contains("Paused") { 0 }
+                else if s.contains("Paused") { 1 }
+                else { 2 }
+            }
+            status_rank(&a.status).cmp(&status_rank(&b.status))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        }),
+        SortBy::Cpu => containers.sort_by(|a, b| {
+            let a_cpu = all_stats.get(&a.id).and_then(|s| s.cpu_percent).unwrap_or(-1.0);
+            let b_cpu = all_stats.get(&b.id).and_then(|s| s.cpu_percent).unwrap_or(-1.0);
+            b_cpu.partial_cmp(&a_cpu).unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        SortBy::Memory => containers.sort_by(|a, b| {
+            let a_mem = all_stats.get(&a.id).and_then(|s| s.mem_used).unwrap_or(0);
+            let b_mem = all_stats.get(&b.id).and_then(|s| s.mem_used).unwrap_or(0);
+            b_mem.cmp(&a_mem)
+        }),
+        SortBy::Disk => containers.sort_by(|a, b| {
+            let a_disk = all_stats.get(&a.id).and_then(|s| s.block_read).unwrap_or(0);
+            let b_disk = all_stats.get(&b.id).and_then(|s| s.block_read).unwrap_or(0);
+            b_disk.cmp(&a_disk)
+        }),
+        SortBy::Network => containers.sort_by(|a, b| {
+            let a_net = all_stats.get(&a.id).and_then(|s| s.net_rx).unwrap_or(0);
+            let b_net = all_stats.get(&b.id).and_then(|s| s.net_rx).unwrap_or(0);
+            b_net.cmp(&a_net)
+        }),
+        SortBy::ComposeProject => containers.sort_by(|a, b| {
+            let a_proj = a.compose_project.as_deref().unwrap_or("\u{ffff}");
+            let b_proj = b.compose_project.as_deref().unwrap_or("\u{ffff}");
+            a_proj.to_lowercase().cmp(&b_proj.to_lowercase())
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        }),
+    }
+}
+
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut app::App,
@@ -354,6 +403,7 @@ async fn run_loop(
                             if let Some(container_id) = app.pending_exec.take() {
                                 terminal::disable_raw_mode()?;
                                 io::stdout().execute(LeaveAlternateScreen)?;
+                                io::stdout().execute(terminal::Clear(terminal::ClearType::All))?;
                                 terminal.show_cursor()?;
 
                                 let status = Command::new("docker")
@@ -391,6 +441,18 @@ async fn run_loop(
                 } else {
                     match app.page {
                         Page::List => match key.code {
+                            KeyCode::Tab => {
+                                app.settings.sort_by = app.settings.sort_by.next();
+                                sort_containers(&mut app.containers, app.settings.sort_by, &app.all_stats);
+                                app.settings.save();
+                                app.set_status(format!("Sort: {}", app.settings.sort_by.label()));
+                            }
+                            KeyCode::BackTab => {
+                                app.settings.sort_by = app.settings.sort_by.prev();
+                                sort_containers(&mut app.containers, app.settings.sort_by, &app.all_stats);
+                                app.settings.save();
+                                app.set_status(format!("Sort: {}", app.settings.sort_by.label()));
+                            }
                             KeyCode::Up => app.select_prev(),
                             KeyCode::Down => app.select_next(),
                             KeyCode::Enter => {
@@ -528,8 +590,16 @@ async fn run_loop(
         let tick_rate = Duration::from_millis(app.settings.refresh_rate.as_millis());
         if last_tick.elapsed() >= tick_rate {
             if let Some(docker) = docker {
+                // Preserve selection across refresh+sort
+                let selected_id = app.selected_container_id().map(|s| s.to_string());
                 app.containers = docker_client::list_containers(docker).await;
-                // Clamp selection if containers were removed
+                sort_containers(&mut app.containers, app.settings.sort_by, &app.all_stats);
+                // Restore selection by ID, or clamp
+                if let Some(ref id) = selected_id {
+                    if let Some(pos) = app.containers.iter().position(|c| c.id == *id) {
+                        app.selected = pos;
+                    }
+                }
                 if !app.containers.is_empty() {
                     app.selected = app.selected.min(app.containers.len() - 1);
                 }
