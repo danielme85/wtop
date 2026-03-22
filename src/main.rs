@@ -92,14 +92,14 @@ async fn handle_action(
             if let Some(docker) = docker {
                 load_container_data(app, docker).await;
             }
-            app.page = Page::Detail;
+            app.set_page(Page::Detail);
             return;
         }
         ContainerAction::Logs => {
             if let Some(docker) = docker {
                 load_container_data(app, docker).await;
             }
-            app.page = Page::Logs;
+            app.set_page(Page::Logs);
             return;
         }
         _ => {}
@@ -146,7 +146,7 @@ fn handle_settings_key(app: &mut app::App, key: KeyCode) {
     match key {
         KeyCode::Esc | KeyCode::Char('s') => {
             // Return to previous page
-            app.page = app.previous_page.unwrap_or(Page::List);
+            app.set_page(app.previous_page.unwrap_or(Page::List));
             app.previous_page = None;
         }
         KeyCode::Up => {
@@ -215,6 +215,12 @@ async fn run_loop(
     let mut last_tick = std::time::Instant::now();
 
     while app.running {
+        // Force a full redraw when the page changes to prevent visual artifacts
+        if app.needs_clear {
+            terminal.clear()?;
+            app.needs_clear = false;
+        }
+
         // Draw
         terminal.draw(|f| ui::draw(f, app))?;
 
@@ -253,7 +259,7 @@ async fn run_loop(
                 } else if key.code == KeyCode::Char('s') && app.page != Page::Settings {
                     // Global 's' opens settings from any page
                     app.previous_page = Some(app.page);
-                    app.page = Page::Settings;
+                    app.set_page(Page::Settings);
                 } else {
                     match app.page {
                         Page::List => match key.code {
@@ -269,7 +275,7 @@ async fn run_loop(
                                     if let Some(docker) = docker {
                                         load_container_data(app, docker).await;
                                     }
-                                    app.page = Page::Detail;
+                                    app.set_page(Page::Detail);
                                 }
                             }
                             KeyCode::Left => {
@@ -278,17 +284,17 @@ async fn run_loop(
                                         load_container_data(app, docker).await;
                                     }
                                     app.auto_scroll = true;
-                                    app.page = Page::Logs;
+                                    app.set_page(Page::Logs);
                                 }
                             }
                             _ => {}
                         },
                         Page::Detail => match key.code {
                             KeyCode::Left => {
-                                app.page = Page::List;
+                                app.set_page(Page::List);
                             }
                             KeyCode::Right => {
-                                app.page = Page::Resources;
+                                app.set_page(Page::Resources);
                             }
                             KeyCode::Up => {
                                 app.detail_scroll = app.detail_scroll.saturating_sub(1);
@@ -317,10 +323,10 @@ async fn run_loop(
                         },
                         Page::Resources => match key.code {
                             KeyCode::Left => {
-                                app.page = Page::Detail;
+                                app.set_page(Page::Detail);
                             }
                             KeyCode::Right => {
-                                app.page = Page::Logs;
+                                app.set_page(Page::Logs);
                             }
                             KeyCode::Enter => {
                                 if app.selected_container_id().is_some() {
@@ -346,11 +352,11 @@ async fn run_loop(
                                 app.auto_scroll = !app.auto_scroll;
                             }
                             KeyCode::Left => {
-                                app.page = Page::Resources;
+                                app.set_page(Page::Resources);
                                 app.auto_scroll = true;
                             }
                             KeyCode::Right => {
-                                app.page = Page::List;
+                                app.set_page(Page::List);
                                 app.auto_scroll = true;
                             }
                             KeyCode::Up => {

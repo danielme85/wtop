@@ -175,6 +175,10 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
     let mut headers: Vec<Cell> = Vec::new();
     let mut constraints: Vec<Constraint> = Vec::new();
 
+    // Status indicator column (always present)
+    headers.push(Cell::from("").style(header_style));
+    constraints.push(Constraint::Length(2));
+
     // Fixed-width columns
     if cols.id {
         headers.push(Cell::from("ID").style(header_style));
@@ -263,7 +267,22 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
 
             let stats = app.all_stats.get(&c.id);
 
+            // Status indicator icon
+            let (icon, icon_color) = if c.status.contains("Paused") {
+                ("⏸", theme.title)
+            } else if c.status.contains("Up") {
+                ("▶", theme.running)
+            } else {
+                ("■", theme.stopped)
+            };
+            let icon_style = if is_selected {
+                Style::default().fg(icon_color).bg(theme.border)
+            } else {
+                Style::default().fg(icon_color)
+            };
+
             let mut cells: Vec<Cell> = Vec::new();
+            cells.push(Cell::from(icon).style(icon_style));
             if cols.id {
                 cells.push(Cell::from(c.id.as_str()).style(base_style));
             }

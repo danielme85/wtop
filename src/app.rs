@@ -366,6 +366,8 @@ pub struct App {
     pub all_history: HashMap<String, StatsHistory>,
     /// Latest stats snapshot per container, used for list-page activity indicators.
     pub all_stats: HashMap<String, ContainerStats>,
+    /// Set to true when the page changes to force a full terminal redraw.
+    pub needs_clear: bool,
 }
 
 impl App {
@@ -390,6 +392,7 @@ impl App {
             previous_page: None,
             all_history: HashMap::new(),
             all_stats: HashMap::new(),
+            needs_clear: false,
         }
     }
 
@@ -424,6 +427,14 @@ impl App {
 
     pub fn set_status(&mut self, msg: String) {
         self.status_message = Some((msg, std::time::Instant::now()));
+    }
+
+    /// Switch to a new page and flag the terminal for a full redraw.
+    pub fn set_page(&mut self, page: Page) {
+        if self.page != page {
+            self.page = page;
+            self.needs_clear = true;
+        }
     }
 
     pub fn quit(&mut self) {
