@@ -44,7 +44,7 @@ get_download_url() {
     # GitHub Releases API is public — no token needed
     releases_url="https://api.github.com/repos/${REPO}/releases/latest"
     download_url=$(curl -fsSL "$releases_url" \
-        | grep -o "\"browser_download_url\":\"[^\"]*${asset_name}\"" \
+        | grep -o "\"browser_download_url\": *\"[^\"]*${asset_name}\"" \
         | head -1 | cut -d'"' -f4)
 
     if [ -z "$download_url" ]; then
