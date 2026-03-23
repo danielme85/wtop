@@ -168,15 +168,15 @@ fn check_poll_all_hint(app: &mut app::App) {
 }
 
 /// Settings grid layout.
-/// Left column:  General (0-5), Logs (18)      → 7 rows
-/// Right column: Columns (6-13), Mini Bars (14-17) → 12 rows
+/// Left column:  General (0-5), Sorting (19), Logs (18)  → 8 rows
+/// Right column: Columns (6-13), Bars & Graphs (20,21,14-17) → 14 rows
 ///
 /// Grid is addressed as (column, row_within_column).
 /// These helpers convert between the flat selection index and grid position.
 /// Left-column flat indices in display order.
 const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 19, 18];
 /// Right-column flat indices in display order.
-const RIGHT_COL: &[usize] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+const RIGHT_COL: &[usize] = &[6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 14, 15, 16, 17];
 
 fn settings_grid_pos(sel: usize) -> (usize, usize) {
     // (column, row_within_column)
@@ -239,6 +239,16 @@ fn adjust_setting(app: &mut app::App, forward: bool) {
             app.settings.sort_by.next()
         } else {
             app.settings.sort_by.prev()
+        },
+        20 => app.settings.bar_style = if forward {
+            app.settings.bar_style.next()
+        } else {
+            app.settings.bar_style.prev()
+        },
+        21 => app.settings.graph_style = if forward {
+            app.settings.graph_style.next()
+        } else {
+            app.settings.graph_style.prev()
         },
         _ => {}
     }

@@ -308,6 +308,114 @@ impl ColumnVisibility {
     pub const COUNT: usize = 8;
 }
 
+/// Bar rendering style for mini inline bars.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BarStyle {
+    /// Modern Unicode block characters: ███░░░
+    #[default]
+    Block,
+    /// Sub-character precision with fractional blocks: ███▌
+    Smooth,
+    /// Gradient fade at the fill boundary: ██▓▒░
+    Gradient,
+    /// Filled/empty circles: ●●●○○○
+    Dot,
+    /// Segmented pipe characters: |||||||.....
+    Pipe,
+    /// CLI-style arrow: [=========> ]
+    Arrow,
+    /// Dotted/colon style: ::::::::....
+    Dashed,
+    /// Classic ASCII: [###------]
+    Classic,
+}
+
+impl BarStyle {
+    const ALL: &[Self] = &[
+        Self::Block,
+        Self::Smooth,
+        Self::Gradient,
+        Self::Dot,
+        Self::Pipe,
+        Self::Arrow,
+        Self::Dashed,
+        Self::Classic,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BarStyle::Block => "Block",
+            BarStyle::Smooth => "Smooth",
+            BarStyle::Gradient => "Gradient",
+            BarStyle::Dot => "Dot",
+            BarStyle::Pipe => "Pipe",
+            BarStyle::Arrow => "Arrow",
+            BarStyle::Dashed => "Dashed",
+            BarStyle::Classic => "Classic",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&s| s == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&s| s == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+/// Sparkline graph rendering style.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GraphStyle {
+    /// Nine-level vertical bars: ▁▂▃▄▅▆▇█
+    #[default]
+    Smooth,
+    /// Three-level vertical bars: ▄█ (retro/chunky)
+    Chunky,
+    /// Braille dot patterns building from bottom: ⣀⣤⣶⣿
+    Braille,
+    /// Density shading (heatmap): ░▒▓█
+    Shade,
+    /// Connected line graph (no fill)
+    Line,
+    /// Line graph with shaded area beneath
+    Area,
+}
+
+impl GraphStyle {
+    const ALL: &[Self] = &[
+        Self::Smooth,
+        Self::Chunky,
+        Self::Braille,
+        Self::Shade,
+        Self::Line,
+        Self::Area,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GraphStyle::Smooth => "Smooth",
+            GraphStyle::Chunky => "Chunky",
+            GraphStyle::Braille => "Braille",
+            GraphStyle::Shade => "Shade",
+            GraphStyle::Line => "Line",
+            GraphStyle::Area => "Area",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|&s| s == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.iter().position(|&s| s == self).unwrap_or(0);
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 /// Sort order for the container list.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortBy {
@@ -378,6 +486,10 @@ pub struct Settings {
     pub show_disk_bar: bool,
     #[serde(default)]
     pub show_network_bar: bool,
+    #[serde(default)]
+    pub bar_style: BarStyle,
+    #[serde(default)]
+    pub graph_style: GraphStyle,
     #[serde(default = "default_true")]
     pub log_color: bool,
     #[serde(default)]
@@ -402,6 +514,8 @@ impl Default for Settings {
             show_mem_bar: false,
             show_disk_bar: false,
             show_network_bar: false,
+            bar_style: BarStyle::default(),
+            graph_style: GraphStyle::default(),
             log_color: true,
             sort_by: SortBy::default(),
         }
