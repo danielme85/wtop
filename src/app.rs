@@ -14,6 +14,7 @@ pub struct ContainerInfo {
     pub name: String,
     pub image: String,
     pub status: String,
+    pub compose_project: Option<String>,
 }
 
 /// Static container information from docker inspect (does not change while running).
@@ -244,6 +245,7 @@ pub enum ContainerAction {
     Kill,
     Details,
     Logs,
+    Exec,
     Remove,
 }
 
@@ -253,6 +255,7 @@ impl ContainerAction {
         vec![
             ContainerAction::Details,
             ContainerAction::Logs,
+            ContainerAction::Exec,
             ContainerAction::Stop,
             ContainerAction::Restart,
             ContainerAction::Pause,
@@ -293,6 +296,7 @@ impl ContainerAction {
             ContainerAction::Kill => "Kill",
             ContainerAction::Details => "Details",
             ContainerAction::Logs => "Logs",
+            ContainerAction::Exec => "Exec (sh)",
             ContainerAction::Remove => "Remove",
         }
     }
@@ -372,6 +376,8 @@ pub struct App {
     pub needs_clear: bool,
     /// Informational popup message (dismissed with Esc/Enter).
     pub info_popup: Option<String>,
+    /// Container ID to exec into (set by handle_action, consumed by run_loop).
+    pub pending_exec: Option<String>,
 }
 
 impl App {
@@ -399,6 +405,7 @@ impl App {
             all_stats: HashMap::new(),
             needs_clear: false,
             info_popup: None,
+            pending_exec: None,
         }
     }
 

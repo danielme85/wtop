@@ -3,12 +3,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap,
+    Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row,
+    Sparkline, Table, Wrap,
 };
 use ratatui::Frame;
 
 use crate::aggregation;
 use crate::app::{App, Page};
+use crate::settings::{BarStyle, GraphStyle, SortBy};
 use crate::theme::Theme;
 
 /// Draw the entire TUI frame (stateless, immediate-mode).
@@ -140,7 +142,10 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
             if app.containers.is_empty() {
                 "s: Settings  q: Quit".to_string()
             } else {
-                "Left/Right: Navigate  Up/Down: Select  Enter: Actions  s: Settings  q: Quit".to_string()
+                format!(
+                    "Left/Right: Navigate  Up/Down: Select  Enter: Actions  Tab: Sort [{}]  s: Settings  q: Quit",
+                    app.settings.sort_by.label()
+                )
             }
         }
         Page::Detail => {
@@ -249,12 +254,43 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
     }
 
     let header_row = Row::new(headers).height(1);
+    let col_count = constraints.len();
 
-    let rows: Vec<Row> = app
-        .containers
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
+    let mut rows: Vec<Row> = Vec::new();
+    let mut last_project: Option<Option<&str>> = None;
+
+    for (i, c) in app.containers.iter().enumerate() {
+        // Insert compose project group header when sorting by compose project
+        if app.settings.sort_by == SortBy::ComposeProject {
+            let current_project = c.compose_project.as_deref();
+            let show_header = match last_project {
+                None => true,
+                Some(ref prev) => *prev != current_project,
+            };
+            if show_header {
+                let label = current_project.unwrap_or("(no project)");
+                let sep_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
+                let mut header_cells: Vec<Cell> = Vec::with_capacity(col_count);
+                // Fill each column: put "──" in the narrow status col,
+                // and the project name in the first flexible column.
+                let mut label_placed = false;
+                // Status indicator column
+                header_cells.push(Cell::from("──").style(sep_style));
+                // Remaining columns
+                for _ in 1..(col_count) {
+                    if !label_placed {
+                        header_cells.push(Cell::from(format!("── {} ──", label)).style(sep_style));
+                        label_placed = true;
+                    } else {
+                        header_cells.push(Cell::from(""));
+                    }
+                }
+                rows.push(Row::new(header_cells));
+                last_project = Some(current_project);
+            }
+        }
+
+        {
             let is_selected = i == app.selected;
             let status_style = if c.status.contains("Up") {
                 Style::default().fg(theme.running)
@@ -315,7 +351,7 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                     Style::default().fg(theme.running)
                 };
                 if app.settings.show_cpu_bar {
-                    let bar = mini_bar_width(pct.unwrap_or(0.0), theme.running, 6);
+                    let bar = mini_bar_width(pct.unwrap_or(0.0), theme.running, 6, app.settings.bar_style);
                     cells.push(Cell::from(Line::from(vec![
                         bar,
                         Span::styled(format!(" {}", val), style),
@@ -335,7 +371,7 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                     Style::default().fg(theme.cyan)
                 };
                 if app.settings.show_mem_bar {
-                    let bar = mini_bar_width(pct.unwrap_or(0.0), theme.cyan, 6);
+                    let bar = mini_bar_width(pct.unwrap_or(0.0), theme.cyan, 6, app.settings.bar_style);
                     cells.push(Cell::from(Line::from(vec![
                         bar,
                         Span::styled(format!(" {}", val), style),
@@ -357,7 +393,7 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                 if app.settings.show_disk_bar {
                     // Use mem_percent-style bar based on block usage (no natural max, so show value only with placeholder bar)
                     let pct = stats.and_then(|s| s.block_read).map(|b| (b as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).min(100.0)).unwrap_or(0.0);
-                    let bar = mini_bar_width(pct, theme.purple, 6);
+                    let bar = mini_bar_width(pct, theme.purple, 6, app.settings.bar_style);
                     cells.push(Cell::from(Line::from(vec![
                         bar,
                         Span::styled(format!(" {}", val), style),
@@ -378,7 +414,7 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                 };
                 if app.settings.show_network_bar {
                     let pct = stats.and_then(|s| s.net_rx).map(|b| (b as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).min(100.0)).unwrap_or(0.0);
-                    let bar = mini_bar_width(pct, theme.cyan, 6);
+                    let bar = mini_bar_width(pct, theme.cyan, 6, app.settings.bar_style);
                     cells.push(Cell::from(Line::from(vec![
                         bar,
                         Span::styled(format!(" {}", val), style),
@@ -388,9 +424,9 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                 }
             }
 
-            Row::new(cells)
-        })
-        .collect();
+            rows.push(Row::new(cells));
+        }
+    }
 
     let table = Table::new(rows, constraints)
         .header(header_row)
@@ -549,18 +585,173 @@ fn right_align_data(data: &[u64], area_width: u16) -> Vec<u64> {
     }
 }
 
-/// Render a mini inline bar like [###------] for a 0–100 percentage.
-fn mini_bar(percent: f64, fill_color: Color) -> Span<'static> {
-    mini_bar_width(percent, fill_color, 10)
+/// Render a mini inline bar for a 0–100 percentage using the given style.
+fn mini_bar(percent: f64, fill_color: Color, style: BarStyle) -> Span<'static> {
+    mini_bar_width(percent, fill_color, 10, style)
 }
 
 /// Render a mini inline bar with configurable width.
-fn mini_bar_width(percent: f64, fill_color: Color, width: usize) -> Span<'static> {
+fn mini_bar_width(
+    percent: f64,
+    fill_color: Color,
+    width: usize,
+    style: BarStyle,
+) -> Span<'static> {
     let clamped = percent.clamp(0.0, 100.0);
     let filled = ((clamped / 100.0) * width as f64).round() as usize;
     let empty = width - filled;
-    let bar = format!("[{}{}]", "#".repeat(filled), "-".repeat(empty));
-    Span::styled(bar, Style::default().fg(fill_color))
+
+    match style {
+        BarStyle::Block => {
+            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+            Span::styled(bar, Style::default().fg(fill_color))
+        }
+        BarStyle::Smooth => {
+            const FRACS: &[&str] = &[" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+            let total_eighths = ((clamped / 100.0) * (width * 8) as f64).round() as usize;
+            let full = total_eighths / 8;
+            let remainder = total_eighths % 8;
+            let trail = width - full - if remainder > 0 { 1 } else { 0 };
+            let frac = if remainder > 0 { FRACS[remainder] } else { "" };
+            let bar = format!("{}{}{}", "█".repeat(full), frac, " ".repeat(trail));
+            Span::styled(bar, Style::default().fg(fill_color))
+        }
+        BarStyle::Gradient => {
+            let mut bar = String::with_capacity(width * 4);
+            for i in 0..width {
+                if i < filled.saturating_sub(2) {
+                    bar.push('█');
+                } else if i == filled.saturating_sub(2) && filled >= 2 {
+                    bar.push('▓');
+                } else if i == filled.saturating_sub(1) && filled >= 1 {
+                    bar.push('▒');
+                } else {
+                    bar.push(' ');
+                }
+            }
+            Span::styled(bar, Style::default().fg(fill_color))
+        }
+        BarStyle::Dot => {
+            let bar = format!("{}{}", "●".repeat(filled), "○".repeat(empty));
+            Span::styled(bar, Style::default().fg(fill_color))
+        }
+        BarStyle::Pipe => {
+            let bar = format!("{}{}", "|".repeat(filled), ".".repeat(empty));
+            Span::styled(bar, Style::default().fg(fill_color))
+        }
+        BarStyle::Arrow => {
+            // [=========> ----] style — needs at least 3 chars to show head
+            let inner = width.saturating_sub(2);
+            let fill = ((clamped / 100.0) * inner as f64).round() as usize;
+            let head = if fill > 0 { ">" } else { "-" };
+            let eq = fill.saturating_sub(1);
+            let dashes = inner - fill;
+            let bar = format!("[{}{}{}]", "=".repeat(eq), head, "-".repeat(dashes));
+            Span::styled(bar, Style::default().fg(fill_color))
+        }
+        BarStyle::Dashed => {
+            let bar = format!("{}{}", ":".repeat(filled), ".".repeat(empty));
+            Span::styled(bar, Style::default().fg(fill_color))
+        }
+        BarStyle::Classic => {
+            let bar = format!("[{}{}]", "#".repeat(filled), "-".repeat(empty));
+            Span::styled(bar, Style::default().fg(fill_color))
+        }
+    }
+}
+
+fn sparkline_bar_set(style: GraphStyle) -> symbols::bar::Set {
+    match style {
+        GraphStyle::Smooth => symbols::bar::NINE_LEVELS,
+        GraphStyle::Chunky => symbols::bar::THREE_LEVELS,
+        GraphStyle::Braille => symbols::bar::Set {
+            full:            "⣿",
+            seven_eighths:   "⣷",
+            three_quarters:  "⣶",
+            five_eighths:    "⣤",
+            half:            "⣤",
+            three_eighths:   "⣀",
+            one_quarter:     "⣀",
+            one_eighth:      "⡀",
+            empty:           " ",
+        },
+        GraphStyle::Shade => symbols::bar::Set {
+            full:            "█",
+            seven_eighths:   "█",
+            three_quarters:  "▓",
+            five_eighths:    "▓",
+            half:            "▒",
+            three_eighths:   "▒",
+            one_quarter:     "░",
+            one_eighth:      "░",
+            empty:           " ",
+        },
+        // Line/Area use the Chart widget — this path is never reached for those styles
+        GraphStyle::Line | GraphStyle::Area => symbols::bar::NINE_LEVELS,
+    }
+}
+
+/// Render a graph widget (Sparkline or Chart) into `area`.
+///
+/// Line/Area styles use ratatui's `Chart` widget with a connected line.
+/// All other styles use `Sparkline` with the appropriate bar set.
+fn render_graph(
+    frame: &mut Frame,
+    data: &[u64],
+    y_max: u64,
+    color: Color,
+    graph_style: GraphStyle,
+    title: &str,
+    theme: &Theme,
+    area: ratatui::layout::Rect,
+) {
+    if matches!(graph_style, GraphStyle::Line | GraphStyle::Area) {
+        let xy: Vec<(f64, f64)> = data
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i as f64, v as f64))
+            .collect();
+        let x_max = (xy.len() as f64 - 1.0).max(1.0);
+        let y_bound = y_max as f64;
+
+        let mut datasets = Vec::new();
+        if matches!(graph_style, GraphStyle::Area) {
+            datasets.push(
+                Dataset::default()
+                    .graph_type(GraphType::Bar)
+                    .style(Style::default().fg(color).add_modifier(Modifier::DIM))
+                    .data(&xy),
+            );
+        }
+        datasets.push(
+            Dataset::default()
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+                .data(&xy),
+        );
+
+        let chart = Chart::new(datasets)
+            .block(spark_block(title, theme))
+            .x_axis(
+                Axis::default()
+                    .bounds([0.0, x_max])
+                    .style(Style::default().fg(theme.border)),
+            )
+            .y_axis(
+                Axis::default()
+                    .bounds([0.0, y_bound])
+                    .style(Style::default().fg(theme.border)),
+            );
+        frame.render_widget(chart, area);
+    } else {
+        let spark = Sparkline::default()
+            .block(spark_block(title, theme))
+            .data(data)
+            .max(y_max)
+            .style(Style::default().fg(color))
+            .bar_set(sparkline_bar_set(graph_style));
+        frame.render_widget(spark, area);
+    }
 }
 
 fn format_bytes_short(bytes: u64) -> String {
@@ -653,7 +844,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
     .split(rows[0]);
 
     // CPU
-    let cpu_bar = mini_bar(stats.cpu_percent.unwrap_or(0.0), theme.running);
+    let cpu_bar = mini_bar(stats.cpu_percent.unwrap_or(0.0), theme.running, app.settings.bar_style);
     let cpu_summary = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("  CPU ", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
@@ -668,7 +859,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
     frame.render_widget(cpu_summary, summary_cols[0]);
 
     // Memory
-    let mem_bar = mini_bar(stats.mem_percent.unwrap_or(0.0), theme.cyan);
+    let mem_bar = mini_bar(stats.mem_percent.unwrap_or(0.0), theme.cyan, app.settings.bar_style);
     let mem_summary = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("  Memory ", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
@@ -726,13 +917,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
         stats.cpu_percent.map(|c| format!("{:.1}%", c)).unwrap_or_else(|| "n/a".into()),
         stats.cpu_percent.map(|c| format!("{:.1}%", c / num_cpus as f64)).unwrap_or_else(|| "n/a".into()),
     );
-    let cpu_spark = Sparkline::default()
-        .block(spark_block(&cpu_title, theme))
-        .data(&cpu_data)
-        .max(10000) // 100.00% in fixed-point
-        .style(Style::default().fg(theme.running))
-        .bar_set(symbols::bar::NINE_LEVELS);
-    frame.render_widget(cpu_spark, rows[1]);
+    render_graph(frame, &cpu_data, 10000, theme.running, app.settings.graph_style, &cpu_title, theme, rows[1]);
 
     // ── Memory Sparkline ──
     let mem_agg = aggregation::aggregate_ring(&app.history.mem, agg_mode, agg_window);
@@ -743,13 +928,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
         stats.mem_usage.as_deref().unwrap_or("n/a"),
         stats.mem_percent.map(|p| format!("{:.1}%", p)).unwrap_or_else(|| "n/a".into())
     );
-    let mem_spark = Sparkline::default()
-        .block(spark_block(&mem_title, theme))
-        .data(&mem_data)
-        .max(mem_max + mem_max / 10) // 10% headroom
-        .style(Style::default().fg(theme.cyan))
-        .bar_set(symbols::bar::NINE_LEVELS);
-    frame.render_widget(mem_spark, rows[2]);
+    render_graph(frame, &mem_data, mem_max + mem_max / 10, theme.cyan, app.settings.graph_style, &mem_title, theme, rows[2]);
 
     // ── Disk I/O Sparkline ──
     let disk_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -772,21 +951,9 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
     let disk_r_title = format!("Disk Read — {}", format_bytes_short(disk_r_val));
     let disk_w_title = format!("Disk Write — {}", format_bytes_short(disk_w_val));
 
-    let disk_r_spark = Sparkline::default()
-        .block(spark_block(&disk_r_title, theme))
-        .data(&disk_r_data)
-        .max(disk_max + disk_max / 10)
-        .style(Style::default().fg(theme.purple))
-        .bar_set(symbols::bar::NINE_LEVELS);
-    frame.render_widget(disk_r_spark, disk_cols[0]);
-
-    let disk_w_spark = Sparkline::default()
-        .block(spark_block(&disk_w_title, theme))
-        .data(&disk_w_data)
-        .max(disk_max + disk_max / 10)
-        .style(Style::default().fg(theme.stopped))
-        .bar_set(symbols::bar::NINE_LEVELS);
-    frame.render_widget(disk_w_spark, disk_cols[1]);
+    let disk_y_max = disk_max + disk_max / 10;
+    render_graph(frame, &disk_r_data, disk_y_max, theme.purple, app.settings.graph_style, &disk_r_title, theme, disk_cols[0]);
+    render_graph(frame, &disk_w_data, disk_y_max, theme.stopped, app.settings.graph_style, &disk_w_title, theme, disk_cols[1]);
 
     // ── Network I/O Sparkline ──
     let net_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -809,21 +976,9 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
     let net_rx_title = format!("Net RX — {}", format_bytes_short(net_rx_val));
     let net_tx_title = format!("Net TX — {}", format_bytes_short(net_tx_val));
 
-    let net_rx_spark = Sparkline::default()
-        .block(spark_block(&net_rx_title, theme))
-        .data(&net_rx_data)
-        .max(net_max + net_max / 10)
-        .style(Style::default().fg(theme.cyan))
-        .bar_set(symbols::bar::NINE_LEVELS);
-    frame.render_widget(net_rx_spark, net_cols[0]);
-
-    let net_tx_spark = Sparkline::default()
-        .block(spark_block(&net_tx_title, theme))
-        .data(&net_tx_data)
-        .max(net_max + net_max / 10)
-        .style(Style::default().fg(theme.accent))
-        .bar_set(symbols::bar::NINE_LEVELS);
-    frame.render_widget(net_tx_spark, net_cols[1]);
+    let net_y_max = net_max + net_max / 10;
+    render_graph(frame, &net_rx_data, net_y_max, theme.cyan, app.settings.graph_style, &net_rx_title, theme, net_cols[0]);
+    render_graph(frame, &net_tx_data, net_y_max, theme.accent, app.settings.graph_style, &net_tx_title, theme, net_cols[1]);
 }
 
 /// Detected log level for a line.
@@ -1137,6 +1292,10 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         ("Poll All Containers", on_off(app.settings.poll_all_containers).to_string()),
     ];
 
+    let sorting: Vec<(&str, String)> = vec![
+        ("Sort By", app.settings.sort_by.label().to_string()),
+    ];
+
     let logs: Vec<(&str, String)> = vec![
         ("Log Colors", on_off(app.settings.log_color).to_string()),
     ];
@@ -1150,6 +1309,8 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     }
 
     let bars: Vec<(&str, String)> = vec![
+        ("Bar Style", app.settings.bar_style.label().to_string()),
+        ("Graph Style", app.settings.graph_style.label().to_string()),
         ("CPU", on_off(app.settings.show_cpu_bar).to_string()),
         ("MEM", on_off(app.settings.show_mem_bar).to_string()),
         ("Disk", on_off(app.settings.show_disk_bar).to_string()),
@@ -1165,12 +1326,14 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     let col_layout =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
 
-    // ── Left column: General + Logs ──
+    // ── Left column: General + Sorting + Logs ──
     // Compute heights: each section needs rows + 2 (border)
     let general_h = general.len() as u16 + 2;
+    let sorting_h = sorting.len() as u16 + 2;
     let logs_h = logs.len() as u16 + 2;
     let left_sections = Layout::vertical([
         Constraint::Length(general_h),
+        Constraint::Length(sorting_h),
         Constraint::Length(logs_h),
         Constraint::Min(0),
     ])
@@ -1191,10 +1354,25 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .collect();
     frame.render_widget(Paragraph::new(general_lines), general_inner);
 
+    // Sorting box
+    let sorting_block = spark_block("Sorting", theme);
+    let sorting_inner = sorting_block.inner(left_sections[1]);
+    frame.render_widget(sorting_block, left_sections[1]);
+
+    let sorting_lines: Vec<Line> = sorting
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let is_sel = sel == 19 + i;
+            settings_row(label, value, is_sel, is_sel && editing, theme)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(sorting_lines), sorting_inner);
+
     // Logs box
     let logs_block = spark_block("Logs", theme);
-    let logs_inner = logs_block.inner(left_sections[1]);
-    frame.render_widget(logs_block, left_sections[1]);
+    let logs_inner = logs_block.inner(left_sections[2]);
+    frame.render_widget(logs_block, left_sections[2]);
 
     let logs_lines: Vec<Line> = logs
         .iter()
@@ -1206,12 +1384,14 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .collect();
     frame.render_widget(Paragraph::new(logs_lines), logs_inner);
 
-    // ── Right column: Columns + Mini Bars ──
+    // ── Right column: Columns + Mini Bars + Preview ──
     let columns_h = columns.len() as u16 + 2;
     let bars_h = bars.len() as u16 + 2;
+    let preview_h: u16 = 6 + 6; // bar box(6) + graph box(6: border 2 + 4 rows like real graphs)
     let right_sections = Layout::vertical([
         Constraint::Length(columns_h),
         Constraint::Length(bars_h),
+        Constraint::Length(preview_h),
         Constraint::Min(0),
     ])
     .split(col_layout[1]);
@@ -1237,13 +1417,58 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     let bars_inner = bars_block.inner(right_sections[1]);
     frame.render_widget(bars_block, right_sections[1]);
 
+    // Flat indices: Bar Style=20, Graph Style=21, CPU=14, MEM=15, Disk=16, Network=17
+    let bars_flat_idx = [20, 21, 14, 15, 16, 17];
     let bars_lines: Vec<Line> = bars
         .iter()
         .enumerate()
         .map(|(i, (label, value))| {
-            let is_sel = sel == 14 + i;
+            let is_sel = sel == bars_flat_idx[i];
             settings_row(label, value, is_sel, is_sel && editing, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(bars_lines), bars_inner);
+
+    // ── Preview box ──
+    let preview_area = right_sections[2];
+    if preview_area.height >= 6 {
+        // Split preview into bar samples (top) and sparkline graph (bottom)
+        let preview_sections = Layout::vertical([
+            Constraint::Length(6), // border(2) + 3 bar samples + 1 pad
+            Constraint::Length(6), // border(2) + 4 rows (matches real sparkline Min(4))
+        ])
+        .split(preview_area);
+
+        // Bar preview box
+        let bar_block = spark_block(
+            &format!("Bar Preview — {}", app.settings.bar_style.label()),
+            theme,
+        );
+        let bar_inner = bar_block.inner(preview_sections[0]);
+        frame.render_widget(bar_block, preview_sections[0]);
+
+        let bar_w = (bar_inner.width as usize).saturating_sub(7); // room for " 25% "
+        let sample_lines: Vec<Line> = [25.0, 50.0, 75.0]
+            .iter()
+            .map(|&pct| {
+                let bar = mini_bar_width(pct, theme.running, bar_w.max(4), app.settings.bar_style);
+                Line::from(vec![
+                    Span::styled(format!(" {:>2.0}% ", pct), Style::default().fg(theme.dim)),
+                    bar,
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(sample_lines), bar_inner);
+
+        // Graph preview box — render with synthetic sine wave using current style
+        let graph_title = format!("Graph Preview — {}", app.settings.graph_style.label());
+        let graph_w = preview_sections[1].width.saturating_sub(2) as usize; // inside border
+        let sample_data: Vec<u64> = (0..graph_w.max(1))
+            .map(|i| {
+                let t = i as f64 / graph_w.max(1) as f64 * std::f64::consts::PI * 3.0;
+                ((t.sin() * 0.4 + 0.5) * 10000.0) as u64
+            })
+            .collect();
+        render_graph(frame, &sample_data, 10000, theme.cyan, app.settings.graph_style, &graph_title, theme, preview_sections[1]);
+    }
 }

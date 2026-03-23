@@ -1,6 +1,6 @@
 [package]
 name = "wtop"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "A nimble, asynchronous Docker container monitor TUI"
 license = "MIT"
