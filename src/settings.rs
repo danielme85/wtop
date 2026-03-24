@@ -551,5 +551,193 @@ impl Settings {
             let _ = std::fs::write(&path, content);
         }
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Enum cycling ---
+
+    #[test]
+    fn aggregation_mode_cycles_forward() {
+        assert_eq!(AggregationMode::Average.next(), AggregationMode::Max);
+        assert_eq!(AggregationMode::Max.next(), AggregationMode::Last);
+        assert_eq!(AggregationMode::Last.next(), AggregationMode::Average);
+    }
+
+    #[test]
+    fn aggregation_mode_cycles_backward() {
+        assert_eq!(AggregationMode::Average.prev(), AggregationMode::Last);
+        assert_eq!(AggregationMode::Last.prev(), AggregationMode::Max);
+        assert_eq!(AggregationMode::Max.prev(), AggregationMode::Average);
+    }
+
+    #[test]
+    fn theme_cycles_both_directions() {
+        // forward wraps: Norse → Light → Dark → Mono → Norse
+        let themes = [ThemeName::Norse, ThemeName::Light, ThemeName::Dark, ThemeName::Mono];
+        for i in 0..themes.len() {
+            assert_eq!(themes[i].next(), themes[(i + 1) % themes.len()]);
+            assert_eq!(themes[(i + 1) % themes.len()].prev(), themes[i]);
+        }
+    }
+
+    #[test]
+    fn refresh_rate_cycles_both_directions() {
+        let rates = [RefreshRate::Ms250, RefreshRate::Ms500, RefreshRate::S1, RefreshRate::S2];
+        for i in 0..rates.len() {
+            assert_eq!(rates[i].next(), rates[(i + 1) % rates.len()]);
+            assert_eq!(rates[(i + 1) % rates.len()].prev(), rates[i]);
+        }
+    }
+
+    #[test]
+    fn log_buffer_size_cycles_both_directions() {
+        let sizes = [
+            LogBufferSize::Lines100,
+            LogBufferSize::Lines200,
+            LogBufferSize::Lines500,
+            LogBufferSize::Lines1000,
+        ];
+        for i in 0..sizes.len() {
+            assert_eq!(sizes[i].next(), sizes[(i + 1) % sizes.len()]);
+            assert_eq!(sizes[(i + 1) % sizes.len()].prev(), sizes[i]);
+        }
+    }
+
+    #[test]
+    fn sort_by_cycles_both_directions() {
+        let variants = [
+            SortBy::Name, SortBy::Status, SortBy::Cpu,
+            SortBy::Memory, SortBy::Disk, SortBy::Network, SortBy::ComposeProject,
+        ];
+        for i in 0..variants.len() {
+            assert_eq!(variants[i].next(), variants[(i + 1) % variants.len()]);
+            assert_eq!(variants[(i + 1) % variants.len()].prev(), variants[i]);
+        }
+    }
+
+    #[test]
+    fn bar_style_cycles_both_directions() {
+        // spot-check wrap-around
+        assert_eq!(BarStyle::Classic.next(), BarStyle::Block);
+        assert_eq!(BarStyle::Block.prev(), BarStyle::Classic);
+    }
+
+    #[test]
+    fn graph_style_cycles_both_directions() {
+        assert_eq!(GraphStyle::Area.next(), GraphStyle::Smooth);
+        assert_eq!(GraphStyle::Smooth.prev(), GraphStyle::Area);
+    }
+
+    // --- AggregationWindow ---
+
+    #[test]
+    fn aggregation_window_clamps_at_max() {
+        let mut w = AggregationWindow(20);
+        w.increment();
+        assert_eq!(w.as_secs_f64(), 5.0);
+    }
+
+    #[test]
+    fn aggregation_window_clamps_at_min() {
+        let mut w = AggregationWindow(1);
+        w.decrement();
+        assert_eq!(w.as_secs_f64(), 0.25);
+    }
+
+    #[test]
+    fn aggregation_window_increments_correctly() {
+        let mut w = AggregationWindow(4); // 1.0s
+        w.increment();
+        assert_eq!(w.as_secs_f64(), 1.25);
+    }
+
+    #[test]
+    fn aggregation_window_as_ticks() {
+        // 1.0s window (4 quarter-seconds), 250ms tick → 4 ticks
+        let w = AggregationWindow(4);
+        assert_eq!(w.as_ticks(250), 4);
+        // 500ms tick → 2 ticks
+        assert_eq!(w.as_ticks(500), 2);
+        // tick larger than window → clamps to 1
+        assert_eq!(w.as_ticks(2000), 1);
+    }
+
+    // --- ColumnVisibility ---
+
+    #[test]
+    fn column_toggle_works() {
+        let mut cols = ColumnVisibility::default();
+        assert!(cols.id); // on by default
+        cols.toggle(0);   // turn off ID
+        assert!(!cols.id);
+        cols.toggle(0);   // turn back on
+        assert!(cols.id);
+    }
+
+    #[test]
+    fn column_toggle_refuses_last_visible() {
+        let mut cols = ColumnVisibility {
+            id: true,
+            name: false,
+            image: false,
+            status: false,
+            cpu: false,
+            mem: false,
+            disk: false,
+            network: false,
+        };
+        assert_eq!(cols.visible_count(), 1);
+        cols.toggle(0); // should be refused
+        assert!(cols.id, "last visible column must not be toggled off");
+        assert_eq!(cols.visible_count(), 1);
+    }
+
+    #[test]
+    fn column_visible_count_is_accurate() {
+        let mut cols = ColumnVisibility::default();
+        let initial = cols.visible_count();
+        cols.toggle(4); // enable cpu (was off)
+        assert_eq!(cols.visible_count(), initial + 1);
+        cols.toggle(4); // disable again
+        assert_eq!(cols.visible_count(), initial);
+    }
+
+    // --- Settings round-trip ---
+
+    #[test]
+    fn settings_toml_round_trip() {
+        let original = Settings::default();
+        let serialized = toml::to_string_pretty(&original).expect("serialize");
+        let deserialized: Settings = toml::from_str(&serialized).expect("deserialize");
+
+        assert_eq!(deserialized.aggregation_mode, original.aggregation_mode);
+        assert_eq!(deserialized.theme, original.theme);
+        assert_eq!(deserialized.refresh_rate, original.refresh_rate);
+        assert_eq!(deserialized.log_buffer_size, original.log_buffer_size);
+        assert_eq!(deserialized.poll_all_containers, original.poll_all_containers);
+        assert_eq!(deserialized.bar_style, original.bar_style);
+        assert_eq!(deserialized.graph_style, original.graph_style);
+        assert_eq!(deserialized.log_color, original.log_color);
+        assert_eq!(deserialized.sort_by, original.sort_by);
+    }
+
+    #[test]
+    fn settings_deserialize_missing_fields_uses_defaults() {
+        // A minimal TOML with only the required fields — serde defaults fill the rest
+        let toml = r#"
+            aggregation_mode = "Average"
+            aggregation_window = 4
+            theme = "Norse"
+            refresh_rate = "Ms250"
+            log_buffer_size = "Lines200"
+        "#;
+        let s: Settings = toml::from_str(toml).expect("deserialize partial settings");
+        assert!(!s.poll_all_containers);
+        assert!(!s.show_cpu_bar);
+        assert!(s.log_color); // default_true
+        assert_eq!(s.sort_by, SortBy::default());
+    }
 }

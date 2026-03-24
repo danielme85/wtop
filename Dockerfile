@@ -1,7 +1,8 @@
 # Stage 1: Build
-FROM rust:1.88-bookworm AS builder
+FROM rust:1-bookworm AS builder
 WORKDIR /usr/src/wtop
 COPY Cargo.toml Cargo.lock* ./
+COPY build.rs ./
 COPY src/ src/
 RUN cargo build --release
 

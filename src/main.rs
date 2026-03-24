@@ -21,8 +21,40 @@ use ratatui::Terminal;
 use app::{ContainerAction, ContainerInfo, Page};
 use settings::SortBy;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const BUILD_DATE: &str = env!("BUILD_DATE");
+const GIT_HASH: &str = env!("GIT_HASH");
+const GIT_BRANCH: &str = env!("GIT_BRANCH");
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Handle CLI arguments before entering the TUI
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--version" | "-V" => {
+                println!(
+                    "wtop {} (built {}, {}/{})",
+                    VERSION, BUILD_DATE, GIT_BRANCH, GIT_HASH
+                );
+                return Ok(());
+            }
+            "--update" => {
+                run_update(false)?;
+                return Ok(());
+            }
+            "--reinstall" => {
+                run_update(true)?;
+                return Ok(());
+            }
+            arg => {
+                eprintln!("Unknown argument: {}", arg);
+                eprintln!("Usage: wtop [--version] [--update] [--reinstall]");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Connect to Docker (fail gracefully if unavailable)
     let docker = docker_client::connect().ok();
 
@@ -355,6 +387,93 @@ fn sort_containers(containers: &mut [ContainerInfo], sort_by: SortBy, all_stats:
     }
 }
 
+/// Check GitHub releases and update (or reinstall) the binary via remote-install.sh.
+fn run_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    println!("wtop {} — checking for updates...", VERSION);
+
+    let output = Command::new("curl")
+        .args([
+            "-fsSL",
+            "-H",
+            "Accept: application/vnd.github.v3+json",
+            "https://api.github.com/repos/danielme85/wtop/releases/latest",
+        ])
+        .output()
+        .map_err(|e| format!("curl not found: {}", e))?;
+
+    if !output.status.success() {
+        eprintln!("Failed to reach GitHub API (curl exited {:?})", output.status.code());
+        return Ok(());
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    let latest_tag = match extract_json_string(&body, "tag_name") {
+        Some(t) => t,
+        None => {
+            eprintln!("Could not parse latest release version from GitHub API response.");
+            return Ok(());
+        }
+    };
+    let latest_version = latest_tag.trim_start_matches('v');
+
+    println!("Latest release: {}", latest_version);
+
+    if !force && !is_newer(latest_version, VERSION) {
+        println!(
+            "Already up to date ({}). Use --reinstall to force a clean reinstall.",
+            VERSION
+        );
+        return Ok(());
+    }
+
+    if force {
+        println!("Reinstalling wtop {}...", latest_version);
+    } else {
+        println!("Updating {} → {}...", VERSION, latest_version);
+    }
+
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg("curl -fsSL https://raw.githubusercontent.com/danielme85/wtop/main/remote-install.sh | sh")
+        .status()
+        .map_err(|e| format!("Failed to run install script: {}", e))?;
+
+    if status.success() {
+        if force {
+            println!("\nSuccessfully reinstalled wtop {}.", latest_version);
+        } else {
+            println!("\nSuccessfully updated wtop {} → {}.", VERSION, latest_version);
+        }
+        println!("Run 'wtop --version' to confirm.");
+    } else {
+        eprintln!("Install script failed (exit {:?}).", status.code());
+    }
+
+    Ok(())
+}
+
+/// Extract the string value for a JSON key (no external parser needed).
+fn extract_json_string(json: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{}\":", key);
+    let pos = json.find(&marker)?;
+    let after = json[pos + marker.len()..].trim_start();
+    if after.starts_with('"') {
+        let inner = &after[1..];
+        let end = inner.find('"')?;
+        Some(inner[..end].to_string())
+    } else {
+        None
+    }
+}
+
+/// Returns true if `latest` is strictly greater than `current` (semver numeric comparison).
+fn is_newer(latest: &str, current: &str) -> bool {
+    fn parse(v: &str) -> Vec<u64> {
+        v.split('.').filter_map(|p| p.parse().ok()).collect()
+    }
+    parse(latest) > parse(current)
+}
+
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut app::App,
@@ -682,4 +801,192 @@ async fn run_loop(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use app::{ContainerInfo, ContainerStats};
+
+    // --- is_newer ---
+
+    #[test]
+    fn is_newer_patch_increment() {
+        assert!(is_newer("1.0.3", "1.0.2"));
+    }
+
+    #[test]
+    fn is_newer_minor_increment() {
+        assert!(is_newer("1.1.0", "1.0.9"));
+    }
+
+    #[test]
+    fn is_newer_major_increment() {
+        assert!(is_newer("2.0.0", "1.9.9"));
+    }
+
+    #[test]
+    fn is_newer_same_version_is_false() {
+        assert!(!is_newer("1.0.2", "1.0.2"));
+    }
+
+    #[test]
+    fn is_newer_older_version_is_false() {
+        assert!(!is_newer("1.0.1", "1.0.2"));
+    }
+
+    // --- extract_json_string ---
+
+    #[test]
+    fn extract_json_string_basic() {
+        let json = r#"{"tag_name": "v1.0.3", "name": "Release 1.0.3"}"#;
+        assert_eq!(extract_json_string(json, "tag_name"), Some("v1.0.3".to_string()));
+    }
+
+    #[test]
+    fn extract_json_string_with_whitespace_after_colon() {
+        // GitHub API sometimes emits extra whitespace after the colon
+        let json = r#"{"tag_name":  "v2.0.0"}"#;
+        assert_eq!(extract_json_string(json, "tag_name"), Some("v2.0.0".to_string()));
+    }
+
+    #[test]
+    fn extract_json_string_missing_key_returns_none() {
+        let json = r#"{"other_key": "value"}"#;
+        assert_eq!(extract_json_string(json, "tag_name"), None);
+    }
+
+    #[test]
+    fn extract_json_string_picks_correct_key() {
+        let json = r#"{"name": "the release", "tag_name": "v1.2.3", "body": "notes"}"#;
+        assert_eq!(extract_json_string(json, "tag_name"), Some("v1.2.3".to_string()));
+        assert_eq!(extract_json_string(json, "name"), Some("the release".to_string()));
+    }
+
+    // --- sort_containers ---
+
+    fn make_container(id: &str, name: &str, status: &str, compose: Option<&str>) -> ContainerInfo {
+        ContainerInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            image: "img".to_string(),
+            status: status.to_string(),
+            compose_project: compose.map(|s| s.to_string()),
+        }
+    }
+
+    fn make_stats(cpu: Option<f64>, mem: Option<u64>, block_read: Option<u64>, net_rx: Option<u64>) -> ContainerStats {
+        ContainerStats {
+            cpu_percent: cpu,
+            mem_used: mem,
+            block_read,
+            net_rx,
+            ..ContainerStats::default()
+        }
+    }
+
+    #[test]
+    fn sort_by_name_alphabetical() {
+        let mut containers = vec![
+            make_container("3", "zebra", "Up", None),
+            make_container("1", "alpha", "Up", None),
+            make_container("2", "mango", "Up", None),
+        ];
+        sort_containers(&mut containers, SortBy::Name, &HashMap::new());
+        let names: Vec<&str> = containers.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn sort_by_name_is_case_insensitive() {
+        let mut containers = vec![
+            make_container("1", "Zebra", "Up", None),
+            make_container("2", "apple", "Up", None),
+        ];
+        sort_containers(&mut containers, SortBy::Name, &HashMap::new());
+        assert_eq!(containers[0].name, "apple");
+    }
+
+    #[test]
+    fn sort_by_status_running_before_paused_before_stopped() {
+        let mut containers = vec![
+            make_container("1", "c1", "Exited (0)", None),
+            make_container("2", "c2", "Up 2 hours (Paused)", None),
+            make_container("3", "c3", "Up 5 minutes", None),
+        ];
+        sort_containers(&mut containers, SortBy::Status, &HashMap::new());
+        assert_eq!(containers[0].id, "3"); // running
+        assert_eq!(containers[1].id, "2"); // paused
+        assert_eq!(containers[2].id, "1"); // stopped
+    }
+
+    #[test]
+    fn sort_by_status_ties_broken_by_name() {
+        let mut containers = vec![
+            make_container("1", "zebra", "Up 1 hour", None),
+            make_container("2", "alpha", "Up 2 hours", None),
+        ];
+        sort_containers(&mut containers, SortBy::Status, &HashMap::new());
+        assert_eq!(containers[0].name, "alpha");
+        assert_eq!(containers[1].name, "zebra");
+    }
+
+    #[test]
+    fn sort_by_cpu_descending() {
+        let mut containers = vec![
+            make_container("a", "low", "Up", None),
+            make_container("b", "high", "Up", None),
+            make_container("c", "mid", "Up", None),
+        ];
+        let mut stats = HashMap::new();
+        stats.insert("a".to_string(), make_stats(Some(10.0), None, None, None));
+        stats.insert("b".to_string(), make_stats(Some(80.0), None, None, None));
+        stats.insert("c".to_string(), make_stats(Some(40.0), None, None, None));
+        sort_containers(&mut containers, SortBy::Cpu, &stats);
+        let names: Vec<&str> = containers.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["high", "mid", "low"]);
+    }
+
+    #[test]
+    fn sort_by_cpu_missing_stats_sorts_last() {
+        let mut containers = vec![
+            make_container("a", "no-stats", "Up", None),
+            make_container("b", "has-stats", "Up", None),
+        ];
+        let mut stats = HashMap::new();
+        stats.insert("b".to_string(), make_stats(Some(5.0), None, None, None));
+        sort_containers(&mut containers, SortBy::Cpu, &stats);
+        assert_eq!(containers[0].name, "has-stats");
+        assert_eq!(containers[1].name, "no-stats");
+    }
+
+    #[test]
+    fn sort_by_memory_descending() {
+        let mut containers = vec![
+            make_container("a", "small", "Up", None),
+            make_container("b", "large", "Up", None),
+        ];
+        let mut stats = HashMap::new();
+        stats.insert("a".to_string(), make_stats(None, Some(100), None, None));
+        stats.insert("b".to_string(), make_stats(None, Some(900), None, None));
+        sort_containers(&mut containers, SortBy::Memory, &stats);
+        assert_eq!(containers[0].name, "large");
+    }
+
+    #[test]
+    fn sort_by_compose_project_groups_then_by_name() {
+        let mut containers = vec![
+            make_container("1", "web",   "Up", Some("proj-b")),
+            make_container("2", "alpha", "Up", Some("proj-a")),
+            make_container("3", "db",    "Up", Some("proj-a")),
+            make_container("4", "solo",  "Up", None),
+        ];
+        sort_containers(&mut containers, SortBy::ComposeProject, &HashMap::new());
+        // proj-a containers first (alphabetical project), then proj-b, then no-project last
+        assert_eq!(containers[0].name, "alpha");
+        assert_eq!(containers[1].name, "db");
+        assert_eq!(containers[2].name, "web");
+        assert_eq!(containers[3].name, "solo");
+    }
 }
