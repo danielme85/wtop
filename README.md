@@ -33,6 +33,12 @@
 
 ## Install
 
+### Homebrew (macOS)
+
+```bash
+brew install danielme85/tap/wtop
+```
+
 ### From source
 
 ```bash
