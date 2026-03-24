@@ -60,3 +60,55 @@ jobs:
         with:
           generate_release_notes: true
           files: artifacts/wtop-linux-*/wtop-linux-*
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get tag version
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Get tarball SHA256
+        id: sha
+        run: |
+          sha=$(curl -sL "https://github.com/danielme85/wtop/archive/refs/tags/v${{ steps.tag.outputs.version }}.tar.gz" | sha256sum | awk '{print $1}')
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: danielme85/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update formula
+        run: |
+          cat > Formula/wtop.rb << 'FORMULA'
+          class Wtop < Formula
+            desc "A nimble, asynchronous Docker container monitor TUI"
+            homepage "https://github.com/danielme85/wtop"
+            url "https://github.com/danielme85/wtop/archive/refs/tags/v${{ steps.tag.outputs.version }}.tar.gz"
+            sha256 "${{ steps.sha.outputs.sha256 }}"
+            license "MIT"
+
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "install", *std_cargo_args
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/wtop --version")
+            end
+          end
+          FORMULA
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' Formula/wtop.rb
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/wtop.rb
+          git commit -m "Update wtop to v${{ steps.tag.outputs.version }}"
+          git push

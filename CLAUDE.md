@@ -40,6 +40,16 @@ src/
 - **bollard** — async Docker API client
 - **tokio** — async runtime
 
+## Homebrew
+
+Available via a custom tap. The release workflow automatically updates the tap formula when a new version tag is pushed.
+
+```bash
+brew install danielme85/tap/wtop
+```
+
+The formula and tap repo live at [danielme85/homebrew-tap](https://github.com/danielme85/homebrew-tap). The `update-homebrew` job in `.github/workflows/release.yml` handles automatic updates — it requires the `HOMEBREW_TAP_TOKEN` repository secret.
+
 ## Cross-compilation
 
 ```bash
