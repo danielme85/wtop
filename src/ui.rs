@@ -92,7 +92,7 @@ fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
     let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(40)]).split(inner);
 
     let title = Paragraph::new(Line::from(vec![Span::styled(
-        " 🐋 WhaleTop ",
+        format!(" 🐋 WhaleTop v{} ", env!("CARGO_PKG_VERSION")),
         Style::default()
             .fg(theme.title)
             .add_modifier(Modifier::BOLD),

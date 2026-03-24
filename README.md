@@ -88,6 +88,14 @@ wtop          # launch the TUI
               # press 'q' to quit
 ```
 
+### CLI Options
+
+| Flag | Description |
+|------|-------------|
+| `--version`, `-V` | Print version, build date, branch, and commit hash |
+| `--update` | Check GitHub for a newer release and self-update |
+| `--reinstall` | Force reinstall of the latest release (even if already up to date) |
+
 ---
 
 ## Navigation
