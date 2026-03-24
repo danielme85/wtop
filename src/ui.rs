@@ -660,7 +660,7 @@ fn mini_bar_width(
     }
 }
 
-fn sparkline_bar_set(style: GraphStyle) -> symbols::bar::Set {
+fn sparkline_bar_set(style: GraphStyle) -> symbols::bar::Set<'static> {
     match style {
         GraphStyle::Smooth => symbols::bar::NINE_LEVELS,
         GraphStyle::Chunky => symbols::bar::THREE_LEVELS,

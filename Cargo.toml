@@ -9,7 +9,7 @@ repository = "https://github.com/danielme85/wtop"
 [dependencies]
 bollard = "0.18"
 crossterm = "0.28"
-ratatui = "0.29"
+ratatui = "0.30"
 futures-util = "0.3"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
