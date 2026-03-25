@@ -72,6 +72,12 @@ fn spark_block<'a>(title: &str, theme: &Theme) -> Block<'a> {
         .style(Style::default().bg(theme.bg))
 }
 
+/// Spark block with internal padding for settings sections.
+fn padded_spark_block<'a>(title: &str, theme: &Theme) -> Block<'a> {
+    spark_block(title, theme)
+        .padding(ratatui::widgets::Padding::new(1, 1, 1, 0))
+}
+
 fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layout::Rect) {
     let total = app.containers.len();
     let running = app
@@ -184,7 +190,6 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
 }
 
 fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layout::Rect) {
-    let row_h = app.settings.line_spacing.row_height();
     let cols = &app.settings.columns;
     let header_style = Style::default()
         .fg(theme.title)
@@ -433,7 +438,7 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                 }
             }
 
-            rows.push(Row::new(cells).height(row_h));
+            rows.push(Row::new(cells));
         }
     }
 
@@ -643,20 +648,6 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
             "Loading...".to_string(),
             Style::default().fg(theme.dim),
         )));
-    }
-
-    // Add extra spacing between detail lines in comfortable mode
-    use crate::settings::LineSpacing;
-    if app.settings.line_spacing == LineSpacing::Comfortable {
-        let mut spaced = Vec::with_capacity(lines.len() * 2);
-        for line in lines {
-            // Double up blank lines (section dividers) for extra breathing room
-            if line.width() == 0 {
-                spaced.push(Line::default());
-            }
-            spaced.push(line);
-        }
-        lines = spaced;
     }
 
     let paragraph = Paragraph::new(lines)
@@ -1417,21 +1408,6 @@ fn draw_info_popup(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(paragraph, inner);
 }
 
-/// Insert blank lines between items when in Comfortable spacing mode.
-fn spaced_lines(lines: Vec<Line<'_>>, comfortable: bool) -> Vec<Line<'_>> {
-    if !comfortable || lines.is_empty() {
-        return lines;
-    }
-    let mut out = Vec::with_capacity(lines.len() * 2);
-    for (i, line) in lines.into_iter().enumerate() {
-        if i > 0 {
-            out.push(Line::default());
-        }
-        out.push(line);
-    }
-    out
-}
-
 /// Render a single settings row (label + value selector).
 fn settings_row<'a>(label: &str, value: &str, selected: bool, editing: bool, theme: &Theme) -> Line<'a> {
     let value_display = if editing {
@@ -1482,14 +1458,11 @@ fn settings_row<'a>(label: &str, value: &str, selected: bool, editing: bool, the
 }
 
 fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layout::Rect) {
-    use crate::settings::{ColumnVisibility, LineSpacing};
+    use crate::settings::ColumnVisibility;
 
     let on_off = |v: bool| if v { "On" } else { "Off" };
     let sel = app.settings_selection;
     let editing = app.settings_editing;
-    let comfortable = app.settings.line_spacing == LineSpacing::Comfortable;
-    // Extra rows needed per section when comfortable (n-1 blank lines between n items)
-    let spacing_extra = |n: u16| if comfortable { n.saturating_sub(1) } else { 0 };
 
     // ── Build data for each section ──
 
@@ -1500,7 +1473,6 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         ("Refresh Rate", app.settings.refresh_rate.label().to_string()),
         ("Log Buffer Size", app.settings.log_buffer_size.label().to_string()),
         ("Poll All Containers", on_off(app.settings.poll_all_containers).to_string()),
-        ("Line Spacing", app.settings.line_spacing.label().to_string()),
     ];
 
     let sorting: Vec<(&str, String)> = vec![
@@ -1549,10 +1521,10 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     let right_col = col_layout[2];
 
     // ── Left column: General + Sorting + Logs + About ──
-    // Compute heights: each section needs rows + 2 (border) + spacing
-    let general_h = general.len() as u16 + 2 + spacing_extra(general.len() as u16);
-    let sorting_h = sorting.len() as u16 + 2 + spacing_extra(sorting.len() as u16);
-    let logs_h = logs.len() as u16 + 2 + spacing_extra(logs.len() as u16);
+    // Compute heights: rows + 2 (border) + 2 (internal padding top/bottom)
+    let general_h = general.len() as u16 + 4;
+    let sorting_h = sorting.len() as u16 + 4;
+    let logs_h = logs.len() as u16 + 4;
     let left_sections = Layout::vertical([
         Constraint::Length(general_h),
         Constraint::Length(1), // spacer
@@ -1565,24 +1537,22 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     .split(left_col);
 
     // General box (index 0)
-    let general_block = spark_block("General", theme);
+    let general_block = padded_spark_block("General", theme);
     let general_inner = general_block.inner(left_sections[0]);
     frame.render_widget(general_block, left_sections[0]);
 
-    // Flat indices: 0-5 for first 6 items, 22 for Line Spacing
-    let general_flat_idx = [0, 1, 2, 3, 4, 5, 22];
     let general_lines: Vec<Line> = general
         .iter()
         .enumerate()
         .map(|(i, (label, value))| {
-            let is_sel = sel == general_flat_idx[i];
+            let is_sel = sel == i;
             settings_row(label, value, is_sel, is_sel && editing, theme)
         })
         .collect();
-    frame.render_widget(Paragraph::new(spaced_lines(general_lines, comfortable)), general_inner);
+    frame.render_widget(Paragraph::new(general_lines), general_inner);
 
     // Sorting box (index 2, after spacer)
-    let sorting_block = spark_block("Sorting", theme);
+    let sorting_block = padded_spark_block("Sorting", theme);
     let sorting_inner = sorting_block.inner(left_sections[2]);
     frame.render_widget(sorting_block, left_sections[2]);
 
@@ -1594,10 +1564,10 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
             settings_row(label, value, is_sel, is_sel && editing, theme)
         })
         .collect();
-    frame.render_widget(Paragraph::new(spaced_lines(sorting_lines, comfortable)), sorting_inner);
+    frame.render_widget(Paragraph::new(sorting_lines), sorting_inner);
 
     // Logs box (index 4, after spacer)
-    let logs_block = spark_block("Logs", theme);
+    let logs_block = padded_spark_block("Logs", theme);
     let logs_inner = logs_block.inner(left_sections[4]);
     frame.render_widget(logs_block, left_sections[4]);
 
@@ -1609,11 +1579,11 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
             settings_row(label, value, is_sel, is_sel && editing, theme)
         })
         .collect();
-    frame.render_widget(Paragraph::new(spaced_lines(logs_lines, comfortable)), logs_inner);
+    frame.render_widget(Paragraph::new(logs_lines), logs_inner);
 
     // ── About box (index 6, after spacer) ──
     if left_sections[6].height >= 4 {
-        let about_block = spark_block("About", theme);
+        let about_block = padded_spark_block("About", theme);
         let about_inner = about_block.inner(left_sections[6]);
         frame.render_widget(about_block, left_sections[6]);
 
@@ -1668,8 +1638,8 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     }
 
     // ── Right column: Columns + Mini Bars + Preview ──
-    let columns_h = columns.len() as u16 + 2 + spacing_extra(columns.len() as u16);
-    let bars_h = bars.len() as u16 + 2 + spacing_extra(bars.len() as u16);
+    let columns_h = columns.len() as u16 + 4;
+    let bars_h = bars.len() as u16 + 4;
     let preview_h: u16 = 6 + 6; // bar box(6) + graph box(6: border 2 + 4 rows like real graphs)
     let right_sections = Layout::vertical([
         Constraint::Length(columns_h),
@@ -1682,7 +1652,7 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     .split(right_col);
 
     // Columns box (index 0)
-    let columns_block = spark_block("Columns", theme);
+    let columns_block = padded_spark_block("Columns", theme);
     let columns_inner = columns_block.inner(right_sections[0]);
     frame.render_widget(columns_block, right_sections[0]);
 
@@ -1695,10 +1665,10 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
             settings_row(short, value, is_sel, is_sel && editing, theme)
         })
         .collect();
-    frame.render_widget(Paragraph::new(spaced_lines(columns_lines, comfortable)), columns_inner);
+    frame.render_widget(Paragraph::new(columns_lines), columns_inner);
 
     // Mini Bars box (index 2, after spacer)
-    let bars_block = spark_block("Mini Bars", theme);
+    let bars_block = padded_spark_block("Mini Bars", theme);
     let bars_inner = bars_block.inner(right_sections[2]);
     frame.render_widget(bars_block, right_sections[2]);
 
@@ -1712,7 +1682,7 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
             settings_row(label, value, is_sel, is_sel && editing, theme)
         })
         .collect();
-    frame.render_widget(Paragraph::new(spaced_lines(bars_lines, comfortable)), bars_inner);
+    frame.render_widget(Paragraph::new(bars_lines), bars_inner);
 
     // ── Preview box (index 4, after spacer) ──
     let preview_area = right_sections[4];

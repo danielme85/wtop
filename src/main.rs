@@ -203,7 +203,7 @@ fn check_poll_all_hint(app: &mut app::App) {
 /// Grid is addressed as (column, row_within_column).
 /// These helpers convert between the flat selection index and grid position.
 /// Left-column flat indices in display order.
-const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 22, 19, 18];
+const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 19, 18];
 /// Right-column flat indices in display order.
 const RIGHT_COL: &[usize] = &[6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 14, 15, 16, 17];
 
@@ -278,11 +278,6 @@ fn adjust_setting(app: &mut app::App, forward: bool) {
             app.settings.graph_style.next()
         } else {
             app.settings.graph_style.prev()
-        },
-        22 => app.settings.line_spacing = if forward {
-            app.settings.line_spacing.next()
-        } else {
-            app.settings.line_spacing.prev()
         },
         _ => {}
     }
