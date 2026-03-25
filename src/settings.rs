@@ -527,16 +527,27 @@ impl Settings {
         dirs::config_dir().map(|d| d.join("wtop").join("settings.toml"))
     }
 
-    pub fn load() -> Self {
+    /// Load settings, returning a warning if the file was corrupted.
+    pub fn load_with_warning() -> (Self, Option<String>) {
         let path = match Self::config_path() {
             Some(p) => p,
-            None => return Self::default(),
+            None => return (Self::default(), None),
         };
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => return Self::default(),
+            Err(_) => return (Self::default(), None),
         };
-        toml::from_str(&content).unwrap_or_default()
+        match toml::from_str(&content) {
+            Ok(s) => (s, None),
+            Err(e) => {
+                let msg = format!(
+                    "Settings file corrupted, using defaults.\n{}\nFix or delete: {}",
+                    e,
+                    path.display()
+                );
+                (Self::default(), Some(msg))
+            }
+        }
     }
 
     pub fn save(&self) {

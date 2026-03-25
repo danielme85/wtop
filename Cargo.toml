@@ -1,17 +1,17 @@
 [package]
 name = "wtop"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2021"
 description = "A nimble, asynchronous Docker container monitor TUI"
 license = "MIT"
 repository = "https://github.com/danielme85/wtop"
 
 [dependencies]
-bollard = "0.18"
-crossterm = "0.28"
+bollard = "0.20"
+crossterm = "0.29"
 ratatui = "0.30"
 futures-util = "0.3"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
-dirs = "5"
+toml = "1"
+dirs = "6"

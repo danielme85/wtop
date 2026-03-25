@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Connect to Docker (fail gracefully if unavailable)
-    let docker = docker_client::connect().ok();
+    let mut docker = docker_client::connect().ok();
 
     // Terminal setup
     terminal::enable_raw_mode()?;
@@ -64,10 +64,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let settings = settings::Settings::load();
+    let (settings, settings_warning) = settings::Settings::load_with_warning();
     let mut app = app::App::new(settings);
+    if let Some(msg) = settings_warning {
+        app.info_popup = Some(msg);
+    }
 
-    let result = run_loop(&mut terminal, &mut app, &docker).await;
+    let result = run_loop(&mut terminal, &mut app, &mut docker).await;
 
     // Terminal teardown (always runs)
     terminal::disable_raw_mode()?;
@@ -84,15 +87,9 @@ async fn load_container_data(app: &mut app::App, docker: &bollard::Docker) {
         app.detail = docker_client::inspect_container(docker, &id).await;
 
         if app.settings.poll_all_containers {
-            // Reuse existing history/stats from background polling
-            if let Some(h) = app.all_history.get(&id) {
-                app.history = h.clone();
-            } else {
-                app.history = app::StatsHistory::new();
-            }
-            if let Some(s) = app.all_stats.get(&id) {
-                app.stats = Some(s.clone());
-            } else {
+            // poll_all mode: history/stats live in all_history/all_stats;
+            // only fetch if container has no entry yet
+            if !app.all_stats.contains_key(&id) {
                 app.stats = docker_client::fetch_stats(docker, &id).await;
             }
         } else {
@@ -120,7 +117,7 @@ async fn load_container_data(app: &mut app::App, docker: &bollard::Docker) {
 /// Execute a container action from the action menu.
 async fn handle_action(
     app: &mut app::App,
-    docker: &Option<bollard::Docker>,
+    docker: &mut Option<bollard::Docker>,
     action: ContainerAction,
 ) {
     // Navigation actions don't need Docker
@@ -457,8 +454,7 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
     let marker = format!("\"{}\":", key);
     let pos = json.find(&marker)?;
     let after = json[pos + marker.len()..].trim_start();
-    if after.starts_with('"') {
-        let inner = &after[1..];
+    if let Some(inner) = after.strip_prefix('"') {
         let end = inner.find('"')?;
         Some(inner[..end].to_string())
     } else {
@@ -477,9 +473,11 @@ fn is_newer(latest: &str, current: &str) -> bool {
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut app::App,
-    docker: &Option<bollard::Docker>,
+    docker: &mut Option<bollard::Docker>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_tick = std::time::Instant::now();
+    // Track consecutive failures to throttle reconnect attempts.
+    let mut consecutive_failures: u32 = 0;
 
     while app.running {
         // Force a full redraw when the page changes to prevent visual artifacts
@@ -666,46 +664,71 @@ async fn run_loop(
                             }
                             _ => {}
                         },
-                        Page::Logs => match key.code {
-                            KeyCode::Char('a') => {
-                                app.auto_scroll = !app.auto_scroll;
-                            }
-                            KeyCode::Left => {
-                                app.set_page(Page::Resources);
-                                app.auto_scroll = true;
-                            }
-                            KeyCode::Right => {
-                                app.set_page(Page::List);
-                                app.auto_scroll = true;
-                            }
-                            KeyCode::Up => {
-                                app.auto_scroll = false;
-                                app.log_scroll = app.log_scroll.saturating_sub(1);
-                            }
-                            KeyCode::Down => {
-                                app.auto_scroll = false;
-                                app.log_scroll = app.log_scroll.saturating_add(1);
-                            }
-                            KeyCode::Enter => {
-                                if app.selected_container_id().is_some() {
-                                    app.open_action_menu();
+                        Page::Logs => {
+                            // Search input mode takes priority
+                            if app.log_search_active {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        app.log_search_active = false;
+                                    }
+                                    KeyCode::Enter => {
+                                        app.log_search_active = false;
+                                    }
+                                    KeyCode::Backspace => {
+                                        app.log_search_query.pop();
+                                    }
+                                    KeyCode::Char(c) => {
+                                        app.log_search_query.push(c);
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                match key.code {
+                                    KeyCode::Char('/') => {
+                                        app.log_search_active = true;
+                                        app.log_search_query.clear();
+                                    }
+                                    KeyCode::Char('a') => {
+                                        app.auto_scroll = !app.auto_scroll;
+                                    }
+                                    KeyCode::Left => {
+                                        app.set_page(Page::Resources);
+                                        app.auto_scroll = true;
+                                    }
+                                    KeyCode::Right => {
+                                        app.set_page(Page::List);
+                                        app.auto_scroll = true;
+                                    }
+                                    KeyCode::Up => {
+                                        app.auto_scroll = false;
+                                        app.log_scroll = app.log_scroll.saturating_sub(1);
+                                    }
+                                    KeyCode::Down => {
+                                        app.auto_scroll = false;
+                                        app.log_scroll = app.log_scroll.saturating_add(1);
+                                    }
+                                    KeyCode::Enter => {
+                                        if app.selected_container_id().is_some() {
+                                            app.open_action_menu();
+                                        }
+                                    }
+                                    KeyCode::PageUp => {
+                                        app.select_prev();
+                                        app.auto_scroll = true;
+                                        if let Some(docker) = docker {
+                                            load_container_data(app, docker).await;
+                                        }
+                                    }
+                                    KeyCode::PageDown => {
+                                        app.select_next();
+                                        app.auto_scroll = true;
+                                        if let Some(docker) = docker {
+                                            load_container_data(app, docker).await;
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
-                            KeyCode::PageUp => {
-                                app.select_prev();
-                                app.auto_scroll = true;
-                                if let Some(docker) = docker {
-                                    load_container_data(app, docker).await;
-                                }
-                            }
-                            KeyCode::PageDown => {
-                                app.select_next();
-                                app.auto_scroll = true;
-                                if let Some(docker) = docker {
-                                    load_container_data(app, docker).await;
-                                }
-                            }
-                            _ => {}
                         },
                         Page::Settings => {
                             handle_settings_key(app, key.code);
@@ -718,11 +741,42 @@ async fn run_loop(
         // Refresh on each tick (dynamic rate from settings)
         let tick_rate = Duration::from_millis(app.settings.refresh_rate.as_millis());
         if last_tick.elapsed() >= tick_rate {
-            if let Some(docker) = docker {
+            // Attempt reconnection if Docker is disconnected
+            if docker.is_none() && consecutive_failures < 3 {
+                if let Ok(d) = docker_client::connect() {
+                    *docker = Some(d);
+                    app.set_status("Docker reconnected".to_string());
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures += 1;
+                }
+            }
+            if let Some(ref docker_conn) = docker {
                 // Preserve selection across refresh+sort
                 let selected_id = app.selected_container_id().map(|s| s.to_string());
-                app.containers = docker_client::list_containers(docker).await;
-                sort_containers(&mut app.containers, app.settings.sort_by, &app.all_stats);
+                let new_containers = docker_client::list_containers(docker_conn).await;
+
+                // Detect disconnect: had containers but now empty, and ping fails
+                if new_containers.is_empty()
+                    && !app.containers.is_empty()
+                    && !docker_client::ping(docker_conn).await
+                {
+                    app.set_status("Docker connection lost — attempting to reconnect...".to_string());
+                    *docker = None;
+                    consecutive_failures = 0;
+                    last_tick = std::time::Instant::now();
+                    continue;
+                }
+                consecutive_failures = 0;
+                // Only re-sort if the container set or statuses changed
+                let changed = new_containers.len() != app.containers.len()
+                    || new_containers.iter().zip(app.containers.iter()).any(|(n, o)| {
+                        n.id != o.id || n.status != o.status
+                    });
+                app.containers = new_containers;
+                if changed {
+                    sort_containers(&mut app.containers, app.settings.sort_by, &app.all_stats);
+                }
                 // Restore selection by ID, or clamp
                 if let Some(ref id) = selected_id {
                     if let Some(pos) = app.containers.iter().position(|c| c.id == *id) {
@@ -739,8 +793,8 @@ async fn run_loop(
                         if !container.status.contains("Up") {
                             continue;
                         }
-                        let cid = container.id.clone();
-                        if let Some(new_stats) = docker_client::fetch_stats(docker, &cid).await {
+                        let cid = &container.id;
+                        if let Some(new_stats) = docker_client::fetch_stats(docker_conn, cid).await {
                             let history = app
                                 .all_history
                                 .entry(cid.clone())
@@ -749,14 +803,14 @@ async fn run_loop(
                             let mut stored = new_stats;
                             stored.cpu_percent = cpu_pct;
                             stored.percpu_percent = percpu_pcts;
-                            app.all_stats.insert(cid, stored);
+                            app.all_stats.insert(cid.clone(), stored);
                         }
                     }
                     // Clean up entries for containers that no longer exist
-                    let current_ids: std::collections::HashSet<String> =
-                        app.containers.iter().map(|c| c.id.clone()).collect();
-                    app.all_history.retain(|id, _| current_ids.contains(id));
-                    app.all_stats.retain(|id, _| current_ids.contains(id));
+                    let current_ids: std::collections::HashSet<&str> =
+                        app.containers.iter().map(|c| c.id.as_str()).collect();
+                    app.all_history.retain(|id, _| current_ids.contains(id.as_str()));
+                    app.all_stats.retain(|id, _| current_ids.contains(id.as_str()));
                 }
 
                 // Refresh live data based on current page
@@ -768,16 +822,10 @@ async fn run_loop(
                         }
                         Page::Resources => {
                             if app.settings.poll_all_containers {
-                                // Already polled above; sync to the single-container view
-                                if let Some(h) = app.all_history.get(&id) {
-                                    app.history = h.clone();
-                                }
-                                if let Some(s) = app.all_stats.get(&id) {
-                                    app.stats = Some(s.clone());
-                                }
+                                // Already polled above; UI reads from all_history/all_stats directly
                             } else {
                                 let mut new_stats =
-                                    docker_client::fetch_stats(docker, &id).await;
+                                    docker_client::fetch_stats(docker_conn, &id).await;
                                 if let Some(ref s) = new_stats {
                                     let (cpu_pct, percpu_pcts) = app.history.push(s);
                                     if let Some(ref mut ns) = new_stats {
@@ -790,7 +838,7 @@ async fn run_loop(
                         }
                         Page::Logs => {
                             let log_lines = app.settings.log_buffer_size.as_usize();
-                            app.logs = docker_client::fetch_logs(docker, &id, log_lines).await;
+                            app.logs = docker_client::fetch_logs(docker_conn, &id, log_lines).await;
                         }
                         Page::List | Page::Settings => {}
                     }
@@ -873,6 +921,7 @@ mod tests {
             image: "img".to_string(),
             status: status.to_string(),
             compose_project: compose.map(|s| s.to_string()),
+            health: None,
         }
     }
 

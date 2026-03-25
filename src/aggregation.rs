@@ -6,21 +6,20 @@ use crate::settings::AggregationMode;
 /// Returns a Vec of the same length as the input.
 /// Each output[i] = aggregate of ring[max(0, i-window+1)..=i].
 pub fn aggregate_ring(ring: &VecDeque<u64>, mode: AggregationMode, window: usize) -> Vec<u64> {
-    let data: Vec<u64> = ring.iter().copied().collect();
-    let len = data.len();
+    let len = ring.len();
     if len == 0 || window <= 1 {
-        return data;
+        return ring.iter().copied().collect();
     }
 
     match mode {
-        AggregationMode::Last => data,
+        AggregationMode::Last => ring.iter().copied().collect(),
         AggregationMode::Average => {
             let mut out = Vec::with_capacity(len);
             let mut sum: u64 = 0;
             for i in 0..len {
-                sum += data[i];
+                sum += ring[i];
                 if i >= window {
-                    sum -= data[i - window];
+                    sum -= ring[i - window];
                 }
                 let count = (i + 1).min(window) as u64;
                 out.push(sum / count);
@@ -31,7 +30,10 @@ pub fn aggregate_ring(ring: &VecDeque<u64>, mode: AggregationMode, window: usize
             let mut out = Vec::with_capacity(len);
             for i in 0..len {
                 let start = i.saturating_sub(window - 1);
-                let max_val = data[start..=i].iter().copied().max().unwrap_or(0);
+                let mut max_val = 0u64;
+                for val in ring.range(start..=i) {
+                    max_val = max_val.max(*val);
+                }
                 out.push(max_val);
             }
             out
@@ -46,18 +48,19 @@ pub fn aggregate_latest(ring: &VecDeque<u64>, mode: AggregationMode, window: usi
     }
     let len = ring.len();
     let start = len.saturating_sub(window);
-    let slice: Vec<u64> = ring.range(start..).copied().collect();
 
     match mode {
         AggregationMode::Last => *ring.back().unwrap_or(&0),
         AggregationMode::Average => {
-            if slice.is_empty() {
+            let count = len - start;
+            if count == 0 {
                 0
             } else {
-                slice.iter().sum::<u64>() / slice.len() as u64
+                let sum: u64 = (start..len).map(|i| ring[i]).sum();
+                sum / count as u64
             }
         }
-        AggregationMode::Max => slice.iter().copied().max().unwrap_or(0),
+        AggregationMode::Max => (start..len).map(|i| ring[i]).max().unwrap_or(0),
     }
 }
 

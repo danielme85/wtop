@@ -15,6 +15,8 @@ pub struct ContainerInfo {
     pub image: String,
     pub status: String,
     pub compose_project: Option<String>,
+    /// Health status from Docker (healthy, unhealthy, starting, none).
+    pub health: Option<String>,
 }
 
 /// Static container information from docker inspect (does not change while running).
@@ -31,6 +33,12 @@ pub struct ContainerDetail {
     pub networks: Vec<String>,
     pub compose: Option<ComposeInfo>,
     pub host_network: bool,
+    /// Container restart count from Docker inspect.
+    pub restart_count: Option<i64>,
+    /// Started at timestamp (ISO 8601) for uptime calculation.
+    pub started_at: Option<String>,
+    /// Health status (healthy, unhealthy, starting).
+    pub health: Option<String>,
 }
 
 /// Docker Compose metadata extracted from container labels.
@@ -60,6 +68,12 @@ pub struct ContainerStats {
     pub mem_limit: Option<u64>,
     pub mem_usage: Option<String>,
     pub mem_percent: Option<f64>,
+    /// Memory cache (filesystem cache), in bytes.
+    pub mem_cache: Option<u64>,
+    /// Swap usage in bytes (cgroup v2: memory.swap.current).
+    pub swap_used: Option<u64>,
+    /// Swap limit in bytes.
+    pub swap_limit: Option<u64>,
     pub block_read: Option<u64>,
     pub block_write: Option<u64>,
     pub net_rx: Option<u64>,
@@ -378,6 +392,10 @@ pub struct App {
     pub info_popup: Option<String>,
     /// Container ID to exec into (set by handle_action, consumed by run_loop).
     pub pending_exec: Option<String>,
+    /// Log search: whether the search input is active.
+    pub log_search_active: bool,
+    /// Log search query string.
+    pub log_search_query: String,
 }
 
 impl App {
@@ -406,6 +424,8 @@ impl App {
             needs_clear: false,
             info_popup: None,
             pending_exec: None,
+            log_search_active: false,
+            log_search_query: String::new(),
         }
     }
 
@@ -466,5 +486,27 @@ impl App {
 
     pub fn selected_container_id(&self) -> Option<&str> {
         self.containers.get(self.selected).map(|c| c.id.as_str())
+    }
+
+    /// Get current stats for the selected container, preferring all_stats in poll_all mode.
+    pub fn current_stats(&self) -> Option<&ContainerStats> {
+        if self.settings.poll_all_containers {
+            self.logs_container_id.as_ref()
+                .and_then(|id| self.all_stats.get(id))
+                .or(self.stats.as_ref())
+        } else {
+            self.stats.as_ref()
+        }
+    }
+
+    /// Get current history for the selected container, preferring all_history in poll_all mode.
+    pub fn current_history(&self) -> &StatsHistory {
+        if self.settings.poll_all_containers {
+            self.logs_container_id.as_ref()
+                .and_then(|id| self.all_history.get(id))
+                .unwrap_or(&self.history)
+        } else {
+            &self.history
+        }
     }
 }
