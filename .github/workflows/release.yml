@@ -46,14 +46,7 @@ jobs:
           path: ./wtop-linux-${{ matrix.platform }}
 
   build-macos:
-    strategy:
-      matrix:
-        include:
-          - platform: arm64
-            runner: macos-latest
-          - platform: amd64
-            runner: macos-13
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -65,15 +58,15 @@ jobs:
 
       - name: Rename binary
         run: |
-          cp target/release/wtop ./wtop-darwin-${{ matrix.platform }}
-          chmod +x ./wtop-darwin-${{ matrix.platform }}
-          file ./wtop-darwin-${{ matrix.platform }}
+          cp target/release/wtop ./wtop-darwin-arm64
+          chmod +x ./wtop-darwin-arm64
+          file ./wtop-darwin-arm64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wtop-darwin-${{ matrix.platform }}
-          path: ./wtop-darwin-${{ matrix.platform }}
+          name: wtop-darwin-arm64
+          path: ./wtop-darwin-arm64
 
   release:
     needs: [build-linux, build-macos]
