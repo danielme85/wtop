@@ -28,9 +28,13 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
+    // Target triple (e.g., x86_64-unknown-linux-gnu)
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=GIT_BRANCH={}", git_branch);
     println!("cargo:rustc-env=BUILD_DATE={}", build_date);
+    println!("cargo:rustc-env=BUILD_TARGET={}", target);
 
     // Re-run if git HEAD or branch changes
     println!("cargo:rerun-if-changed=.git/HEAD");

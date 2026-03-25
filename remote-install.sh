@@ -4,6 +4,19 @@ set -e
 REPO="danielme85/wtop"
 BINARY="wtop"
 
+# Detect OS
+detect_os() {
+    os=$(uname -s)
+    case "$os" in
+        Linux)   echo "linux" ;;
+        Darwin)  echo "darwin" ;;
+        *)
+            printf "Unsupported OS: %s\n" "$os" >&2
+            exit 1
+            ;;
+    esac
+}
+
 # Detect architecture
 detect_arch() {
     arch=$(uname -m)
@@ -38,8 +51,7 @@ find_install_dir() {
 
 # Get download URL for the latest release asset
 get_download_url() {
-    platform=$1
-    asset_name="${BINARY}-linux-${platform}"
+    asset_name=$1
 
     # GitHub Releases API is public — no token needed
     releases_url="https://api.github.com/repos/${REPO}/releases/latest"
@@ -57,11 +69,12 @@ get_download_url() {
 }
 
 main() {
-    platform=$(detect_arch)
+    os=$(detect_os)
+    arch=$(detect_arch)
     install_dir=$(find_install_dir)
-    asset_name="${BINARY}-linux-${platform}"
+    asset_name="${BINARY}-${os}-${arch}"
 
-    printf "Detected platform: linux/%s\n" "$platform"
+    printf "Detected platform: %s/%s\n" "$os" "$arch"
     printf "Install directory: %s\n" "$install_dir"
 
     # Create install dir if needed
@@ -69,7 +82,7 @@ main() {
 
     # Download from GitHub Releases (no auth required for public repos)
     printf "Downloading %s...\n" "$asset_name"
-    url=$(get_download_url "$platform")
+    url=$(get_download_url "$asset_name")
 
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' EXIT
