@@ -12,6 +12,8 @@
   <img src="https://img.shields.io/badge/Docker-Socket_API-2496ED?style=flat-square&logo=docker&logoColor=white" />
   <img src="https://img.shields.io/badge/TUI-Ratatui-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/Built_with-Claude_Code-blueviolet?style=flat-square" />
+  <img src="https://img.shields.io/badge/telemetry-none-brightgreen?style=flat-square" />
+  <img src="https://img.shields.io/badge/privacy-respecting-blue?style=flat-square" />
 </p>
 
 ---
