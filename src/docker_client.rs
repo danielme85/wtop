@@ -1,6 +1,6 @@
-use bollard::container::{
-    KillContainerOptions, ListContainersOptions, LogOutput, LogsOptions, MemoryStatsStats,
-    RemoveContainerOptions, StatsOptions,
+use bollard::container::LogOutput;
+use bollard::query_parameters::{
+    KillContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions, StatsOptions,
 };
 use bollard::Docker;
 use futures_util::StreamExt;
@@ -12,9 +12,14 @@ pub fn connect() -> Result<Docker, bollard::errors::Error> {
     Docker::connect_with_local_defaults()
 }
 
+/// Check if the Docker daemon is reachable.
+pub async fn ping(docker: &Docker) -> bool {
+    docker.ping().await.is_ok()
+}
+
 /// List all containers and return simplified info.
 pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
-    let options = ListContainersOptions::<String> {
+    let options = ListContainersOptions {
         all: true,
         ..Default::default()
     };
@@ -28,6 +33,17 @@ pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
                     .as_ref()
                     .and_then(|l| l.get("com.docker.compose.project"))
                     .cloned();
+                let status = c.status.unwrap_or_default();
+                // Parse health from status string (e.g. "Up 2 hours (healthy)")
+                let health = if status.contains("(healthy)") {
+                    Some("healthy".to_string())
+                } else if status.contains("(unhealthy)") {
+                    Some("unhealthy".to_string())
+                } else if status.contains("(health: starting)") {
+                    Some("starting".to_string())
+                } else {
+                    None
+                };
                 ContainerInfo {
                     id: c.id.unwrap_or_default().chars().take(12).collect(),
                     name: c
@@ -37,8 +53,9 @@ pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
                         .trim_start_matches('/')
                         .to_string(),
                     image: c.image.unwrap_or_default(),
-                    status: c.status.unwrap_or_default(),
+                    status,
                     compose_project,
+                    health,
                 }
             })
             .collect(),
@@ -48,7 +65,7 @@ pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
 
 /// Fetch the last `tail` lines of logs for a container.
 pub async fn fetch_logs(docker: &Docker, container_id: &str, tail: usize) -> Vec<String> {
-    let options = LogsOptions::<String> {
+    let options = LogsOptions {
         stdout: true,
         stderr: true,
         tail: tail.to_string(),
@@ -134,6 +151,12 @@ pub async fn inspect_container(docker: &Docker, container_id: &str) -> Option<Co
             .and_then(|h| h.network_mode.as_deref())
             .map(|m| m == "host")
             .unwrap_or(false),
+        restart_count: inspect.restart_count,
+        started_at: state.and_then(|s| s.started_at.clone()),
+        health: state
+            .and_then(|s| s.health.as_ref())
+            .and_then(|h| h.status)
+            .map(|s| format!("{:?}", s)),
         ..Default::default()
     };
 
@@ -211,34 +234,50 @@ pub async fn fetch_stats(docker: &Docker, container_id: &str) -> Option<Containe
     let mut result = ContainerStats::default();
 
     // CPU: store cumulative counters; delta is computed across ticks in StatsHistory
-    result.cpu_total = Some(stats.cpu_stats.cpu_usage.total_usage);
-    result.system_total = stats.cpu_stats.system_cpu_usage;
-    let num_cpus = stats.cpu_stats.online_cpus.unwrap_or(1);
-    result.num_cpus = Some(num_cpus);
+    let cpu_stats = stats.cpu_stats?;
+    let cpu_usage = cpu_stats.cpu_usage?;
+    result.cpu_total = cpu_usage.total_usage;
+    result.system_total = cpu_stats.system_cpu_usage;
+    let num_cpus = cpu_stats.online_cpus.unwrap_or(1);
+    result.num_cpus = Some(num_cpus as u64);
 
     // Per-CPU usage (for per-core display)
-    if let Some(ref percpu) = stats.cpu_stats.cpu_usage.percpu_usage {
+    if let Some(ref percpu) = cpu_usage.percpu_usage {
         result.percpu_total = Some(percpu.clone());
     }
 
     // Memory
-    if let Some(mem_usage) = stats.memory_stats.usage {
-        let cache = stats
-            .memory_stats
+    let mem_stats = stats.memory_stats?;
+    if let Some(mem_usage) = mem_stats.usage {
+        // In bollard 0.20, stats is a HashMap<String, u64> covering both cgroup v1 and v2
+        let cache = mem_stats
             .stats
-            .map(|s| match s {
-                MemoryStatsStats::V1(v1) => v1.cache,
-                MemoryStatsStats::V2(v2) => v2.inactive_file,
+            .as_ref()
+            .map(|s| {
+                // cgroup v2 uses "inactive_file", cgroup v1 uses "cache"
+                s.get("inactive_file")
+                    .or_else(|| s.get("cache"))
+                    .copied()
+                    .unwrap_or(0)
             })
             .unwrap_or(0);
         let used = mem_usage.saturating_sub(cache);
-        let limit = stats.memory_stats.limit.unwrap_or(0);
+        let limit = mem_stats.limit.unwrap_or(0);
         result.mem_used = Some(used);
         result.mem_limit = Some(limit);
+        result.mem_cache = Some(cache);
         result.mem_usage = Some(format!("{} / {}", format_bytes(used), format_bytes(limit)));
         if limit > 0 {
             result.mem_percent = Some(used as f64 / limit as f64 * 100.0);
         }
+
+        // Swap usage (cgroup v2: "swap" in stats map; cgroup v1: swap - usage)
+        if let Some(ref s) = mem_stats.stats {
+            if let Some(&swap) = s.get("swap") {
+                result.swap_used = Some(swap);
+            }
+        }
+        result.swap_limit = mem_stats.max_usage; // cgroup v1 swap limit
     }
 
     // Block I/O (cumulative totals)
@@ -246,27 +285,31 @@ pub async fn fetch_stats(docker: &Docker, container_id: &str) -> Option<Containe
     let mut read_total: u64 = 0;
     let mut write_total: u64 = 0;
     let mut have_blkio = false;
-    if let Some(ref io_stats) = stats.blkio_stats.io_service_bytes_recursive {
-        if !io_stats.is_empty() {
-            have_blkio = true;
-            for entry in io_stats {
-                match entry.op.as_str() {
-                    "read" | "Read" => read_total += entry.value,
-                    "write" | "Write" => write_total += entry.value,
-                    _ => {}
+    if let Some(ref blkio) = stats.blkio_stats {
+        if let Some(ref io_stats) = blkio.io_service_bytes_recursive {
+            if !io_stats.is_empty() {
+                have_blkio = true;
+                for entry in io_stats {
+                    match entry.op.as_deref().unwrap_or("") {
+                        "read" | "Read" => read_total += entry.value.unwrap_or(0),
+                        "write" | "Write" => write_total += entry.value.unwrap_or(0),
+                        _ => {}
+                    }
                 }
             }
         }
     }
     if !have_blkio {
         // cgroup v2: fall back to storage_stats
-        if let Some(r) = stats.storage_stats.read_size_bytes {
-            read_total = r;
-            have_blkio = true;
-        }
-        if let Some(w) = stats.storage_stats.write_size_bytes {
-            write_total = w;
-            have_blkio = true;
+        if let Some(ref storage) = stats.storage_stats {
+            if let Some(r) = storage.read_size_bytes {
+                read_total = r;
+                have_blkio = true;
+            }
+            if let Some(w) = storage.write_size_bytes {
+                write_total = w;
+                have_blkio = true;
+            }
         }
     }
     if have_blkio {
@@ -275,23 +318,19 @@ pub async fn fetch_stats(docker: &Docker, container_id: &str) -> Option<Containe
     }
 
     // Network I/O (cumulative across all interfaces)
-    // Try `networks` (per-interface map) first, fall back to `network` (aggregate)
     if let Some(ref networks) = stats.networks {
         let mut rx_total: u64 = 0;
         let mut tx_total: u64 = 0;
         for net in networks.values() {
-            rx_total += net.rx_bytes;
-            tx_total += net.tx_bytes;
+            rx_total += net.rx_bytes.unwrap_or(0);
+            tx_total += net.tx_bytes.unwrap_or(0);
         }
         result.net_rx = Some(rx_total);
         result.net_tx = Some(tx_total);
-    } else if let Some(ref network) = stats.network {
-        result.net_rx = Some(network.rx_bytes);
-        result.net_tx = Some(network.tx_bytes);
     }
 
     // PIDs
-    result.pids = Some(stats.pids_stats.current.unwrap_or(0));
+    result.pids = Some(stats.pids_stats.and_then(|p| p.current).unwrap_or(0));
 
     Some(result)
 }
@@ -299,7 +338,7 @@ pub async fn fetch_stats(docker: &Docker, container_id: &str) -> Option<Containe
 /// Start a stopped container.
 pub async fn start_container(docker: &Docker, id: &str) -> Result<(), String> {
     docker
-        .start_container::<String>(id, None)
+        .start_container(id, None)
         .await
         .map_err(|e| e.to_string())
 }
@@ -339,7 +378,7 @@ pub async fn unpause_container(docker: &Docker, id: &str) -> Result<(), String> 
 /// Kill a container (SIGKILL).
 pub async fn kill_container(docker: &Docker, id: &str) -> Result<(), String> {
     docker
-        .kill_container(id, None::<KillContainerOptions<String>>)
+        .kill_container(id, None::<KillContainerOptions>)
         .await
         .map_err(|e| e.to_string())
 }

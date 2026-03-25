@@ -155,11 +155,15 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
             "Left/Right: Navigate  Enter: Actions  PgUp/PgDn: Container  s: Settings  q: Quit".to_string()
         }
         Page::Logs => {
-            let scroll_indicator = if app.auto_scroll { "ON" } else { "OFF" };
-            format!(
-                "Left/Right: Navigate  Up/Down: Scroll  Enter: Actions  PgUp/PgDn: Container  a: Auto-scroll [{}]  s: Settings  q: Quit",
-                scroll_indicator
-            )
+            if app.log_search_active {
+                "Type to filter  Enter/Esc: Close search".to_string()
+            } else {
+                let scroll_indicator = if app.auto_scroll { "ON" } else { "OFF" };
+                format!(
+                    "Left/Right: Navigate  Up/Down: Scroll  /: Search  a: Auto-scroll [{}]  s: Settings  q: Quit",
+                    scroll_indicator
+                )
+            }
         }
         Page::Settings => {
             if app.settings_editing {
@@ -312,11 +316,15 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
 
             let stats = app.all_stats.get(&c.id);
 
-            // Status indicator icon
+            // Status indicator icon (includes health status)
             let (icon, icon_color) = if c.status.contains("Paused") {
                 ("⏸", theme.title)
             } else if c.status.contains("Up") {
-                ("▶", theme.running)
+                match c.health.as_deref() {
+                    Some("unhealthy") => ("▶", Color::Rgb(231, 76, 60)), // red
+                    Some("starting") => ("▶", theme.title),              // amber
+                    _ => ("▶", theme.running),                           // green (healthy or no healthcheck)
+                }
             } else {
                 ("■", theme.stopped)
             };
@@ -435,6 +443,65 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
     frame.render_widget(table, area);
 }
 
+/// Format a duration in seconds into a human-readable uptime string.
+fn format_uptime(total_secs: u64) -> String {
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if days > 0 {
+        format!("{}d {}h {}m", days, hours, mins)
+    } else if hours > 0 {
+        format!("{}h {}m {}s", hours, mins, secs)
+    } else if mins > 0 {
+        format!("{}m {}s", mins, secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+/// Parse an ISO 8601 timestamp and return seconds since then, or None.
+fn parse_uptime_secs(started_at: &str) -> Option<u64> {
+    // Format: "2024-01-15T10:30:00.123456789Z"
+    // Parse year-month-day hour:min:sec manually (no chrono dependency)
+    let s = started_at.trim();
+    if s.is_empty() || s.starts_with("0001") {
+        return None; // container never started
+    }
+    // Use std::process::Command to get current UTC time isn't great;
+    // instead compare with SystemTime
+    let parts: Vec<&str> = s.split('T').collect();
+    if parts.len() != 2 { return None; }
+    let date_parts: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    if date_parts.len() != 3 { return None; }
+    let time_str = parts[1].trim_end_matches('Z').split('.').next()?;
+    let time_parts: Vec<u64> = time_str.split(':').filter_map(|p| p.parse().ok()).collect();
+    if time_parts.len() != 3 { return None; }
+
+    // Convert to days since epoch (approximate, good enough for uptime)
+    let (y, m, d) = (date_parts[0], date_parts[1], date_parts[2]);
+    let (h, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
+
+    // Days from epoch using a simplified calculation
+    let days_from_epoch = {
+        let y = if m <= 2 { y - 1 } else { y };
+        let m = if m <= 2 { m + 12 } else { m };
+        365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + d - 719469
+    };
+    let started_epoch_secs = days_from_epoch * 86400 + h * 3600 + min * 60 + sec;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    if now > started_epoch_secs {
+        Some(now - started_epoch_secs)
+    } else {
+        Some(0)
+    }
+}
+
 fn detail_line(label: &str, value: &str, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(
@@ -475,6 +542,19 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
         lines.push(detail_line("  Command:  ", &d.command, theme));
         lines.push(detail_line("  Created:  ", &d.created, theme));
         lines.push(detail_line("  State:    ", &d.state, theme));
+        if let Some(ref health) = d.health {
+            lines.push(detail_line("  Health:   ", health, theme));
+        }
+        if let Some(ref started) = d.started_at {
+            if let Some(secs) = parse_uptime_secs(started) {
+                lines.push(detail_line("  Uptime:   ", &format_uptime(secs), theme));
+            }
+        }
+        if let Some(count) = d.restart_count {
+            if count > 0 {
+                lines.push(detail_line("  Restarts: ", &count.to_string(), theme));
+            }
+        }
         lines.push(Line::default());
 
         // Compose
@@ -691,20 +771,23 @@ fn sparkline_bar_set(style: GraphStyle) -> symbols::bar::Set<'static> {
     }
 }
 
+/// Parameters for rendering a graph widget.
+struct GraphParams<'a> {
+    data: &'a [u64],
+    y_max: u64,
+    color: Color,
+    style: GraphStyle,
+    title: &'a str,
+    theme: &'a Theme,
+    area: ratatui::layout::Rect,
+}
+
 /// Render a graph widget (Sparkline or Chart) into `area`.
 ///
 /// Line/Area styles use ratatui's `Chart` widget with a connected line.
 /// All other styles use `Sparkline` with the appropriate bar set.
-fn render_graph(
-    frame: &mut Frame,
-    data: &[u64],
-    y_max: u64,
-    color: Color,
-    graph_style: GraphStyle,
-    title: &str,
-    theme: &Theme,
-    area: ratatui::layout::Rect,
-) {
+fn render_graph(frame: &mut Frame, p: &GraphParams) {
+    let GraphParams { data, y_max, color, style: graph_style, title, theme, area } = *p;
     if matches!(graph_style, GraphStyle::Line | GraphStyle::Area) {
         let xy: Vec<(f64, f64)> = data
             .iter()
@@ -783,16 +866,17 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    if app.stats.is_none() {
-        let msg = Paragraph::new(Span::styled(
-            "Waiting for stats...",
-            Style::default().fg(theme.dim),
-        ));
-        frame.render_widget(msg, inner);
-        return;
-    }
-
-    let stats = app.stats.as_ref().unwrap();
+    let stats = match app.current_stats() {
+        Some(s) => s,
+        None => {
+            let msg = Paragraph::new(Span::styled(
+                "Waiting for stats...",
+                Style::default().fg(theme.dim),
+            ));
+            frame.render_widget(msg, inner);
+            return;
+        }
+    };
 
     // Layout: summary line + 3 graph rows (CPU, Memory, I/O)
     let rows = Layout::vertical([
@@ -860,14 +944,25 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
 
     // Memory
     let mem_bar = mini_bar(stats.mem_percent.unwrap_or(0.0), theme.cyan, app.settings.bar_style);
-    let mem_summary = Paragraph::new(vec![
+    let cache_str = stats.mem_cache.map(format_bytes_short).unwrap_or_default();
+    let swap_str = stats.swap_used
+        .filter(|&s| s > 0)
+        .map(format_bytes_short);
+    let mut mem_lines = vec![
         Line::from(vec![
             Span::styled("  Memory ", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
             mem_bar,
         ]),
-        Line::from(Span::styled(format!("  {}", mem_str), Style::default().fg(theme.cyan))),
-        Line::from(Span::styled(format!("  {}", mem_pct_str), Style::default().fg(theme.cyan))),
-    ]);
+        Line::from(Span::styled(format!("  {} ({})", mem_str, mem_pct_str), Style::default().fg(theme.cyan))),
+    ];
+    if !cache_str.is_empty() || swap_str.is_some() {
+        let mut detail = format!("  cache: {}", if cache_str.is_empty() { "0 B" } else { &cache_str });
+        if let Some(ref sw) = swap_str {
+            detail.push_str(&format!("  swap: {}", sw));
+        }
+        mem_lines.push(Line::from(Span::styled(detail, Style::default().fg(theme.dim))));
+    }
+    let mem_summary = Paragraph::new(mem_lines);
     frame.render_widget(mem_summary, summary_cols[1]);
 
     // Disk I/O
@@ -909,18 +1004,20 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
     let agg_mode = app.settings.aggregation_mode;
     let agg_window = app.aggregation_window_ticks();
 
+    let history = app.current_history();
+
     // ── CPU Sparkline ──
-    let cpu_agg = aggregation::aggregate_ring(&app.history.cpu, agg_mode, agg_window);
+    let cpu_agg = aggregation::aggregate_ring(&history.cpu, agg_mode, agg_window);
     let cpu_data: Vec<u64> = right_align_data(&cpu_agg, rows[1].width);
     let cpu_title = format!(
         "CPU — {} host ({}/core)",
         stats.cpu_percent.map(|c| format!("{:.1}%", c)).unwrap_or_else(|| "n/a".into()),
         stats.cpu_percent.map(|c| format!("{:.1}%", c / num_cpus as f64)).unwrap_or_else(|| "n/a".into()),
     );
-    render_graph(frame, &cpu_data, 10000, theme.running, app.settings.graph_style, &cpu_title, theme, rows[1]);
+    render_graph(frame, &GraphParams { data: &cpu_data, y_max: 10000, color: theme.running, style: app.settings.graph_style, title: &cpu_title, theme, area: rows[1] });
 
     // ── Memory Sparkline ──
-    let mem_agg = aggregation::aggregate_ring(&app.history.mem, agg_mode, agg_window);
+    let mem_agg = aggregation::aggregate_ring(&history.mem, agg_mode, agg_window);
     let mem_data: Vec<u64> = right_align_data(&mem_agg, rows[2].width);
     let mem_max = mem_data.iter().copied().max().unwrap_or(1).max(1);
     let mem_title = format!(
@@ -928,14 +1025,14 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
         stats.mem_usage.as_deref().unwrap_or("n/a"),
         stats.mem_percent.map(|p| format!("{:.1}%", p)).unwrap_or_else(|| "n/a".into())
     );
-    render_graph(frame, &mem_data, mem_max + mem_max / 10, theme.cyan, app.settings.graph_style, &mem_title, theme, rows[2]);
+    render_graph(frame, &GraphParams { data: &mem_data, y_max: mem_max + mem_max / 10, color: theme.cyan, style: app.settings.graph_style, title: &mem_title, theme, area: rows[2] });
 
     // ── Disk I/O Sparkline ──
     let disk_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(rows[3]);
 
-    let disk_r_agg = aggregation::aggregate_ring(&app.history.block_read, agg_mode, agg_window);
-    let disk_w_agg = aggregation::aggregate_ring(&app.history.block_write, agg_mode, agg_window);
+    let disk_r_agg = aggregation::aggregate_ring(&history.block_read, agg_mode, agg_window);
+    let disk_w_agg = aggregation::aggregate_ring(&history.block_write, agg_mode, agg_window);
     let disk_r_data: Vec<u64> = right_align_data(&disk_r_agg, disk_cols[0].width);
     let disk_w_data: Vec<u64> = right_align_data(&disk_w_agg, disk_cols[1].width);
     let disk_max = disk_r_data
@@ -946,21 +1043,21 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
         .unwrap_or(1)
         .max(1);
 
-    let disk_r_val = aggregation::aggregate_latest(&app.history.block_read, agg_mode, agg_window);
-    let disk_w_val = aggregation::aggregate_latest(&app.history.block_write, agg_mode, agg_window);
+    let disk_r_val = aggregation::aggregate_latest(&history.block_read, agg_mode, agg_window);
+    let disk_w_val = aggregation::aggregate_latest(&history.block_write, agg_mode, agg_window);
     let disk_r_title = format!("Disk Read — {}", format_bytes_short(disk_r_val));
     let disk_w_title = format!("Disk Write — {}", format_bytes_short(disk_w_val));
 
     let disk_y_max = disk_max + disk_max / 10;
-    render_graph(frame, &disk_r_data, disk_y_max, theme.purple, app.settings.graph_style, &disk_r_title, theme, disk_cols[0]);
-    render_graph(frame, &disk_w_data, disk_y_max, theme.stopped, app.settings.graph_style, &disk_w_title, theme, disk_cols[1]);
+    render_graph(frame, &GraphParams { data: &disk_r_data, y_max: disk_y_max, color: theme.purple, style: app.settings.graph_style, title: &disk_r_title, theme, area: disk_cols[0] });
+    render_graph(frame, &GraphParams { data: &disk_w_data, y_max: disk_y_max, color: theme.stopped, style: app.settings.graph_style, title: &disk_w_title, theme, area: disk_cols[1] });
 
     // ── Network I/O Sparkline ──
     let net_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(rows[4]);
 
-    let net_rx_agg = aggregation::aggregate_ring(&app.history.net_rx, agg_mode, agg_window);
-    let net_tx_agg = aggregation::aggregate_ring(&app.history.net_tx, agg_mode, agg_window);
+    let net_rx_agg = aggregation::aggregate_ring(&history.net_rx, agg_mode, agg_window);
+    let net_tx_agg = aggregation::aggregate_ring(&history.net_tx, agg_mode, agg_window);
     let net_rx_data: Vec<u64> = right_align_data(&net_rx_agg, net_cols[0].width);
     let net_tx_data: Vec<u64> = right_align_data(&net_tx_agg, net_cols[1].width);
     let net_max = net_rx_data
@@ -971,14 +1068,14 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
         .unwrap_or(1)
         .max(1);
 
-    let net_rx_val = aggregation::aggregate_latest(&app.history.net_rx, agg_mode, agg_window);
-    let net_tx_val = aggregation::aggregate_latest(&app.history.net_tx, agg_mode, agg_window);
+    let net_rx_val = aggregation::aggregate_latest(&history.net_rx, agg_mode, agg_window);
+    let net_tx_val = aggregation::aggregate_latest(&history.net_tx, agg_mode, agg_window);
     let net_rx_title = format!("Net RX — {}", format_bytes_short(net_rx_val));
     let net_tx_title = format!("Net TX — {}", format_bytes_short(net_tx_val));
 
     let net_y_max = net_max + net_max / 10;
-    render_graph(frame, &net_rx_data, net_y_max, theme.cyan, app.settings.graph_style, &net_rx_title, theme, net_cols[0]);
-    render_graph(frame, &net_tx_data, net_y_max, theme.accent, app.settings.graph_style, &net_tx_title, theme, net_cols[1]);
+    render_graph(frame, &GraphParams { data: &net_rx_data, y_max: net_y_max, color: theme.cyan, style: app.settings.graph_style, title: &net_rx_title, theme, area: net_cols[0] });
+    render_graph(frame, &GraphParams { data: &net_tx_data, y_max: net_y_max, color: theme.accent, style: app.settings.graph_style, title: &net_tx_title, theme, area: net_cols[1] });
 }
 
 /// Detected log level for a line.
@@ -1030,6 +1127,41 @@ fn highlight_log_line<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
     Line::from(Span::styled(line, Style::default().fg(color)))
 }
 
+/// Highlight search matches within a log line.
+fn highlight_search_in_line<'a>(line: &'a str, query: &str, theme: &Theme) -> Line<'a> {
+    if query.is_empty() {
+        return highlight_log_line(line, theme);
+    }
+    let query_lower = query.to_lowercase();
+    let line_lower = line.to_lowercase();
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut last = 0;
+
+    let base_color = match detect_log_level(line) {
+        LogLevel::Error => Color::Rgb(231, 76, 60),
+        LogLevel::Warn => Color::Rgb(230, 180, 40),
+        LogLevel::Info => theme.running,
+        LogLevel::Debug => theme.cyan,
+        LogLevel::Trace => theme.dim,
+        LogLevel::None => theme.text,
+    };
+
+    for (start, _) in line_lower.match_indices(&query_lower) {
+        if start > last {
+            spans.push(Span::styled(&line[last..start], Style::default().fg(base_color)));
+        }
+        spans.push(Span::styled(
+            &line[start..start + query.len()],
+            Style::default().fg(theme.bg).bg(Color::Rgb(230, 180, 40)).add_modifier(Modifier::BOLD),
+        ));
+        last = start + query.len();
+    }
+    if last < line.len() {
+        spans.push(Span::styled(&line[last..], Style::default().fg(base_color)));
+    }
+    Line::from(spans)
+}
+
 fn draw_logs(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::layout::Rect) {
     let container_name = app
         .containers
@@ -1037,16 +1169,36 @@ fn draw_logs(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::lay
         .map(|c| c.name.as_str())
         .unwrap_or("unknown");
 
-    let title = format!("Logs: {}", container_name);
+    let has_search = !app.log_search_query.is_empty();
+    let search_label = if app.log_search_active || has_search {
+        format!(" [filter: {}]", app.log_search_query)
+    } else {
+        String::new()
+    };
+    let title = format!("Logs: {}{}", container_name, search_label);
 
-    let mut lines: Vec<Line> = app
-        .logs
+    // Filter logs by search query (case-insensitive)
+    let query = &app.log_search_query;
+    let query_lower = query.to_lowercase();
+
+    let filtered_logs: Vec<&str> = if has_search {
+        app.logs.iter()
+            .filter(|l| l.to_lowercase().contains(&query_lower))
+            .map(|l| l.as_str())
+            .collect()
+    } else {
+        app.logs.iter().map(|l| l.as_str()).collect()
+    };
+
+    let mut lines: Vec<Line> = filtered_logs
         .iter()
         .map(|l| {
-            if app.settings.log_color {
-                highlight_log_line(l.as_str(), theme)
+            if has_search && app.settings.log_color {
+                highlight_search_in_line(l, query, theme)
+            } else if app.settings.log_color {
+                highlight_log_line(l, theme)
             } else {
-                Line::from(Span::styled(l.as_str(), Style::default().fg(theme.text)))
+                Line::from(Span::styled(*l, Style::default().fg(theme.text)))
             }
         })
         .collect();
@@ -1058,8 +1210,15 @@ fn draw_logs(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::lay
         lines.push(Line::default());
     }
 
+    // Reserve space for search input bar when active
+    let search_bar_height: u16 = if app.log_search_active { 1 } else { 0 };
+    let logs_area = ratatui::layout::Rect {
+        height: area.height.saturating_sub(search_bar_height),
+        ..area
+    };
+
     let block = content_block(&title, theme);
-    let inner = block.inner(area);
+    let inner = block.inner(logs_area);
     let inner_width = inner.width as usize;
     let inner_height = inner.height as usize;
 
@@ -1090,7 +1249,25 @@ fn draw_logs(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::lay
         .wrap(Wrap { trim: false })
         .scroll((app.log_scroll, 0));
 
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, logs_area);
+
+    // Render search input bar at the bottom when active
+    if app.log_search_active {
+        let search_area = ratatui::layout::Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        let search_line = Line::from(vec![
+            Span::styled(" / ", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
+            Span::styled(&app.log_search_query, Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(theme.title)), // cursor
+        ]);
+        let search_bar = Paragraph::new(search_line)
+            .style(Style::default().bg(theme.bg));
+        frame.render_widget(search_bar, search_area);
+    }
 }
 
 fn draw_action_menu(frame: &mut Frame, app: &App, theme: &Theme) {
@@ -1469,6 +1646,6 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
                 ((t.sin() * 0.4 + 0.5) * 10000.0) as u64
             })
             .collect();
-        render_graph(frame, &sample_data, 10000, theme.cyan, app.settings.graph_style, &graph_title, theme, preview_sections[1]);
+        render_graph(frame, &GraphParams { data: &sample_data, y_max: 10000, color: theme.cyan, style: app.settings.graph_style, title: &graph_title, theme, area: preview_sections[1] });
     }
 }
