@@ -1503,7 +1503,7 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     let col_layout =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
 
-    // ── Left column: General + Sorting + Logs ──
+    // ── Left column: General + Sorting + Logs + About ──
     // Compute heights: each section needs rows + 2 (border)
     let general_h = general.len() as u16 + 2;
     let sorting_h = sorting.len() as u16 + 2;
@@ -1512,7 +1512,7 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         Constraint::Length(general_h),
         Constraint::Length(sorting_h),
         Constraint::Length(logs_h),
-        Constraint::Min(0),
+        Constraint::Min(4), // About section fills remaining space
     ])
     .split(col_layout[0]);
 
@@ -1560,6 +1560,62 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         })
         .collect();
     frame.render_widget(Paragraph::new(logs_lines), logs_inner);
+
+    // ── About box ──
+    if left_sections[3].height >= 4 {
+        let about_block = spark_block("About", theme);
+        let about_inner = about_block.inner(left_sections[3]);
+        frame.render_widget(about_block, left_sections[3]);
+
+        let dim = Style::default().fg(theme.dim);
+        let text = Style::default().fg(theme.text);
+        let bold = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
+        let accent = Style::default().fg(theme.running);
+
+        // Detect install location
+        let bin_path = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let install_type = if bin_path.contains(".cargo") {
+            "cargo install"
+        } else if bin_path.contains("homebrew") || bin_path.contains("Cellar") || bin_path.contains("linuxbrew") {
+            "Homebrew"
+        } else if bin_path.contains("target/debug") {
+            "dev build"
+        } else if bin_path.contains("target/release") {
+            "release build"
+        } else {
+            "binary"
+        };
+
+        let mut about_lines: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled(" Version   ", bold),
+                Span::styled(
+                    format!("v{} ({}, {}/{})", env!("CARGO_PKG_VERSION"), env!("BUILD_DATE"), env!("GIT_BRANCH"), env!("GIT_HASH")),
+                    text,
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Install   ", bold),
+                Span::styled(format!("{} — {}", install_type, bin_path), dim),
+            ]),
+            Line::default(),
+            Line::from(vec![
+                Span::styled(" Built with ", dim),
+                Span::styled("Claude Code", accent),
+                Span::styled(" by Anthropic", dim),
+            ]),
+            Line::default(),
+            Line::from(Span::styled(" License: MIT — free and open source", dim)),
+            Line::from(Span::styled(" No telemetry. No tracking. No analytics.", dim)),
+            Line::from(Span::styled(" Your data stays on your machine, always.", dim)),
+        ];
+
+        // Trim lines to fit available height
+        about_lines.truncate(about_inner.height as usize);
+        frame.render_widget(Paragraph::new(about_lines), about_inner);
+    }
 
     // ── Right column: Columns + Mini Bars + Preview ──
     let columns_h = columns.len() as u16 + 2;
