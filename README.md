@@ -16,6 +16,10 @@
   <img src="https://img.shields.io/badge/privacy-respecting-blue?style=flat-square" />
 </p>
 
+<p align="center">
+  <img src="wtop.gif" alt="WhaleTop demo" width="800" />
+</p>
+
 ---
 
 ## Features
