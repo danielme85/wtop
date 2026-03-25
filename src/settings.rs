@@ -416,6 +416,44 @@ impl GraphStyle {
     }
 }
 
+/// Line spacing for text-heavy pages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LineSpacing {
+    /// No extra spacing (current default).
+    #[default]
+    Compact,
+    /// One blank line between rows for easier reading.
+    Comfortable,
+}
+
+impl LineSpacing {
+    pub fn label(self) -> &'static str {
+        match self {
+            LineSpacing::Compact => "Compact",
+            LineSpacing::Comfortable => "Comfortable",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            LineSpacing::Compact => LineSpacing::Comfortable,
+            LineSpacing::Comfortable => LineSpacing::Compact,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        self.next() // only two options, toggle
+    }
+
+    /// Row height for table rows (1 = compact, 2 = comfortable).
+    pub fn row_height(self) -> u16 {
+        match self {
+            LineSpacing::Compact => 1,
+            LineSpacing::Comfortable => 2,
+        }
+    }
+}
+
 /// Sort order for the container list.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortBy {
@@ -494,6 +532,8 @@ pub struct Settings {
     pub log_color: bool,
     #[serde(default)]
     pub sort_by: SortBy,
+    #[serde(default)]
+    pub line_spacing: LineSpacing,
 }
 
 fn default_true() -> bool {
@@ -518,6 +558,7 @@ impl Default for Settings {
             graph_style: GraphStyle::default(),
             log_color: true,
             sort_by: SortBy::default(),
+            line_spacing: LineSpacing::default(),
         }
     }
 }
