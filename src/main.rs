@@ -25,6 +25,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_DATE: &str = env!("BUILD_DATE");
 const GIT_HASH: &str = env!("GIT_HASH");
 const GIT_BRANCH: &str = env!("GIT_BRANCH");
+const BUILD_TARGET: &str = env!("BUILD_TARGET");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,8 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match args[1].as_str() {
             "--version" | "-V" => {
                 println!(
-                    "wtop {} (built {}, {}/{})",
-                    VERSION, BUILD_DATE, GIT_BRANCH, GIT_HASH
+                    "wtop {} (built {}, {}, {}/{})",
+                    VERSION, BUILD_DATE, BUILD_TARGET, GIT_BRANCH, GIT_HASH
                 );
                 return Ok(());
             }
@@ -385,8 +386,31 @@ fn sort_containers(containers: &mut [ContainerInfo], sort_by: SortBy, all_stats:
 }
 
 /// Check GitHub releases and update (or reinstall) the binary via remote-install.sh.
+/// Detect how wtop was installed based on the binary's path.
+enum InstallMethod {
+    Homebrew,
+    Cargo,
+    Binary,
+}
+
+fn detect_install_method() -> InstallMethod {
+    let exe_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    if exe_path.contains("/Cellar/") || exe_path.contains("/homebrew/") {
+        InstallMethod::Homebrew
+    } else if exe_path.contains(".cargo/bin") {
+        InstallMethod::Cargo
+    } else {
+        InstallMethod::Binary
+    }
+}
+
 fn run_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("wtop {} — checking for updates...", VERSION);
+
+    let install_method = detect_install_method();
 
     let output = Command::new("curl")
         .args([
@@ -421,6 +445,22 @@ fn run_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
             VERSION
         );
         return Ok(());
+    }
+
+    match install_method {
+        InstallMethod::Homebrew => {
+            println!("\nThis binary was installed via Homebrew.");
+            println!("To update, run:\n");
+            println!("  brew upgrade wtop");
+            return Ok(());
+        }
+        InstallMethod::Cargo => {
+            println!("\nThis binary was installed via Cargo.");
+            println!("To update, run:\n");
+            println!("  cargo install wtop");
+            return Ok(());
+        }
+        InstallMethod::Binary => {}
     }
 
     if force {

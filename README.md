@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="wtop.gif" alt="WhaleTop demo" width="800" />
+  <img src="wtop.gif" alt="WhaleTop demo" width="400" />
 </p>
 
 ---
