@@ -1494,29 +1494,43 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         ("Network", on_off(app.settings.show_network_bar).to_string()),
     ];
 
-    // ── Layout: outer block, then two columns ──
+    // ── Layout: outer block, then two columns with gap ──
 
-    let outer = content_block("Settings", theme);
+    let outer = Block::default()
+        .title(Span::styled(
+            " Settings ",
+            Style::default().fg(theme.title),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.bg))
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 0));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
     let col_layout =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(inner);
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Length(1), Constraint::Percentage(50)]).split(inner);
+    let left_col = col_layout[0];
+    let right_col = col_layout[2];
 
     // ── Left column: General + Sorting + Logs + About ──
-    // Compute heights: each section needs rows + 2 (border)
+    // Compute heights: each section needs rows + 2 (border) + 1 (spacing)
     let general_h = general.len() as u16 + 2;
     let sorting_h = sorting.len() as u16 + 2;
     let logs_h = logs.len() as u16 + 2;
     let left_sections = Layout::vertical([
         Constraint::Length(general_h),
+        Constraint::Length(1), // spacer
         Constraint::Length(sorting_h),
+        Constraint::Length(1), // spacer
         Constraint::Length(logs_h),
-        Constraint::Min(4), // About section fills remaining space
+        Constraint::Length(1), // spacer
+        Constraint::Min(4),   // About section fills remaining space
     ])
-    .split(col_layout[0]);
+    .split(left_col);
 
-    // General box
+    // General box (index 0)
     let general_block = spark_block("General", theme);
     let general_inner = general_block.inner(left_sections[0]);
     frame.render_widget(general_block, left_sections[0]);
@@ -1531,10 +1545,10 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .collect();
     frame.render_widget(Paragraph::new(general_lines), general_inner);
 
-    // Sorting box
+    // Sorting box (index 2, after spacer)
     let sorting_block = spark_block("Sorting", theme);
-    let sorting_inner = sorting_block.inner(left_sections[1]);
-    frame.render_widget(sorting_block, left_sections[1]);
+    let sorting_inner = sorting_block.inner(left_sections[2]);
+    frame.render_widget(sorting_block, left_sections[2]);
 
     let sorting_lines: Vec<Line> = sorting
         .iter()
@@ -1546,10 +1560,10 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .collect();
     frame.render_widget(Paragraph::new(sorting_lines), sorting_inner);
 
-    // Logs box
+    // Logs box (index 4, after spacer)
     let logs_block = spark_block("Logs", theme);
-    let logs_inner = logs_block.inner(left_sections[2]);
-    frame.render_widget(logs_block, left_sections[2]);
+    let logs_inner = logs_block.inner(left_sections[4]);
+    frame.render_widget(logs_block, left_sections[4]);
 
     let logs_lines: Vec<Line> = logs
         .iter()
@@ -1561,11 +1575,11 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .collect();
     frame.render_widget(Paragraph::new(logs_lines), logs_inner);
 
-    // ── About box ──
-    if left_sections[3].height >= 4 {
+    // ── About box (index 6, after spacer) ──
+    if left_sections[6].height >= 4 {
         let about_block = spark_block("About", theme);
-        let about_inner = about_block.inner(left_sections[3]);
-        frame.render_widget(about_block, left_sections[3]);
+        let about_inner = about_block.inner(left_sections[6]);
+        frame.render_widget(about_block, left_sections[6]);
 
         let dim = Style::default().fg(theme.dim);
         let text = Style::default().fg(theme.text);
@@ -1623,13 +1637,15 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     let preview_h: u16 = 6 + 6; // bar box(6) + graph box(6: border 2 + 4 rows like real graphs)
     let right_sections = Layout::vertical([
         Constraint::Length(columns_h),
+        Constraint::Length(1), // spacer
         Constraint::Length(bars_h),
+        Constraint::Length(1), // spacer
         Constraint::Length(preview_h),
         Constraint::Min(0),
     ])
-    .split(col_layout[1]);
+    .split(right_col);
 
-    // Columns box
+    // Columns box (index 0)
     let columns_block = spark_block("Columns", theme);
     let columns_inner = columns_block.inner(right_sections[0]);
     frame.render_widget(columns_block, right_sections[0]);
@@ -1645,10 +1661,10 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .collect();
     frame.render_widget(Paragraph::new(columns_lines), columns_inner);
 
-    // Mini Bars box
+    // Mini Bars box (index 2, after spacer)
     let bars_block = spark_block("Mini Bars", theme);
-    let bars_inner = bars_block.inner(right_sections[1]);
-    frame.render_widget(bars_block, right_sections[1]);
+    let bars_inner = bars_block.inner(right_sections[2]);
+    frame.render_widget(bars_block, right_sections[2]);
 
     // Flat indices: Bar Style=20, Graph Style=21, CPU=14, MEM=15, Disk=16, Network=17
     let bars_flat_idx = [20, 21, 14, 15, 16, 17];
@@ -1662,8 +1678,8 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .collect();
     frame.render_widget(Paragraph::new(bars_lines), bars_inner);
 
-    // ── Preview box ──
-    let preview_area = right_sections[2];
+    // ── Preview box (index 4, after spacer) ──
+    let preview_area = right_sections[4];
     if preview_area.height >= 6 {
         // Split preview into bar samples (top) and sparkline graph (bottom)
         let preview_sections = Layout::vertical([
