@@ -1,9 +1,13 @@
 # Stage 1: Build
 FROM rust:1-bookworm AS builder
+ARG GIT_HASH=unknown
+ARG GIT_BRANCH=unknown
 WORKDIR /usr/src/wtop
 COPY Cargo.toml Cargo.lock* ./
 COPY build.rs ./
 COPY src/ src/
+ENV GIT_HASH=${GIT_HASH}
+ENV GIT_BRANCH=${GIT_BRANCH}
 RUN cargo build --release
 
 # Stage 2: Runtime
