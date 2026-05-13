@@ -45,6 +45,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.info_popup.is_some() {
         draw_info_popup(frame, app, &theme);
     }
+
+    // Quit-confirm dialog (rendered on very top)
+    if app.quit_confirm {
+        draw_quit_confirm(frame, &theme);
+    }
 }
 
 fn content_block<'a>(title: &str, theme: &Theme) -> Block<'a> {
@@ -86,6 +91,7 @@ fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
         .filter(|c| c.status.contains("Up"))
         .count();
     let stopped = total - running;
+    let ic = crate::icons::get_icons(&app.settings.icon_style);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -113,13 +119,13 @@ fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("▲ {} running  ", running),
+            format!("{}{} running  ", ic.status_running, running),
             Style::default()
                 .fg(theme.running)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("▼ {} stopped ", stopped),
+            format!("{}{} stopped ", ic.status_stopped, stopped),
             Style::default()
                 .fg(theme.stopped)
                 .add_modifier(Modifier::BOLD),
@@ -191,6 +197,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
 
 fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layout::Rect) {
     let cols = &app.settings.columns;
+    let ic = crate::icons::get_icons(&app.settings.icon_style);
     let header_style = Style::default()
         .fg(theme.title)
         .add_modifier(Modifier::BOLD);
@@ -243,22 +250,22 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
 
     // Activity columns (fixed width, wider when bars are enabled)
     if cols.cpu {
-        headers.push(Cell::from("CPU").style(header_style));
+        headers.push(Cell::from(format!("{}CPU", ic.col_cpu)).style(header_style));
         let w = if app.settings.show_cpu_bar { 18 } else { 8 };
         constraints.push(Constraint::Length(w));
     }
     if cols.mem {
-        headers.push(Cell::from("MEM").style(header_style));
+        headers.push(Cell::from(format!("{}MEM", ic.col_mem)).style(header_style));
         let w = if app.settings.show_mem_bar { 18 } else { 8 };
         constraints.push(Constraint::Length(w));
     }
     if cols.disk {
-        headers.push(Cell::from("Disk").style(header_style));
+        headers.push(Cell::from(format!("{}Disk", ic.col_disk)).style(header_style));
         let w = if app.settings.show_disk_bar { 20 } else { 10 };
         constraints.push(Constraint::Length(w));
     }
     if cols.network {
-        headers.push(Cell::from("Net").style(header_style));
+        headers.push(Cell::from(format!("{}Net", ic.col_net)).style(header_style));
         let w = if app.settings.show_network_bar { 20 } else { 10 };
         constraints.push(Constraint::Length(w));
     }
@@ -530,6 +537,7 @@ fn section_header(title: &str, theme: &Theme) -> Line<'static> {
 }
 
 fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::layout::Rect) {
+    let ic = crate::icons::get_icons(&app.settings.icon_style);
     let container_name = app
         .containers
         .get(app.selected)
@@ -542,7 +550,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
 
     if let Some(ref d) = app.detail {
         // General
-        lines.push(section_header("── General ──", theme));
+        lines.push(section_header(&format!("── {}General ──", ic.det_general), theme));
         lines.push(detail_line("  ID:       ", &d.full_id, theme));
         lines.push(detail_line("  Image:    ", &d.image, theme));
         lines.push(detail_line("  Command:  ", &d.command, theme));
@@ -565,7 +573,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
 
         // Compose
         if let Some(ref compose) = d.compose {
-            lines.push(section_header("── Compose ──", theme));
+            lines.push(section_header(&format!("── {}Compose ──", ic.det_compose), theme));
             lines.push(detail_line("  Project:  ", &compose.project, theme));
             lines.push(detail_line("  Service:  ", &compose.service, theme));
             if let Some(ref dir) = compose.working_dir {
@@ -578,7 +586,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
         }
 
         // Network
-        lines.push(section_header("── Network ──", theme));
+        lines.push(section_header(&format!("── {}Network ──", ic.det_network), theme));
         if d.networks.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  (none)".to_string(),
@@ -592,7 +600,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
         lines.push(Line::default());
 
         // Ports
-        lines.push(section_header("── Ports ──", theme));
+        lines.push(section_header(&format!("── {}Ports ──", ic.det_ports), theme));
         if d.ports.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  (none)".to_string(),
@@ -606,7 +614,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
         lines.push(Line::default());
 
         // Volumes
-        lines.push(section_header("── Volumes ──", theme));
+        lines.push(section_header(&format!("── {}Volumes ──", ic.det_volumes), theme));
         if d.volumes.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  (none)".to_string(),
@@ -620,7 +628,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::l
         lines.push(Line::default());
 
         // Environment
-        lines.push(section_header("── Environment ──", theme));
+        lines.push(section_header(&format!("── {}Environment ──", ic.det_environment), theme));
         if d.env.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  (none)".to_string(),
@@ -859,6 +867,7 @@ fn format_bytes_short(bytes: u64) -> String {
 }
 
 fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::layout::Rect) {
+    let ic = crate::icons::get_icons(&app.settings.icon_style);
     let container_name = app
         .containers
         .get(app.selected)
@@ -937,7 +946,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
     let cpu_bar = mini_bar(stats.cpu_percent.unwrap_or(0.0), theme.running, app.settings.bar_style);
     let cpu_summary = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("  CPU ", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {}CPU ", ic.res_cpu), Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
             cpu_bar,
         ]),
         Line::from(vec![
@@ -956,7 +965,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
         .map(format_bytes_short);
     let mut mem_lines = vec![
         Line::from(vec![
-            Span::styled("  Memory ", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {}Memory ", ic.res_memory), Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
             mem_bar,
         ]),
         Line::from(Span::styled(format!("  {} ({})", mem_str, mem_pct_str), Style::default().fg(theme.cyan))),
@@ -973,7 +982,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
 
     // Disk I/O
     let disk_summary = Paragraph::new(vec![
-        Line::from(Span::styled("  Disk I/O", Style::default().fg(theme.title).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(format!("  {}Disk I/O", ic.res_disk), Style::default().fg(theme.title).add_modifier(Modifier::BOLD))),
         Line::from(vec![
             Span::styled("  R: ", Style::default().fg(theme.dim)),
             Span::styled(blk_r, Style::default().fg(theme.purple)),
@@ -987,7 +996,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
 
     // Network I/O
     let net_summary = Paragraph::new(vec![
-        Line::from(Span::styled("  Network", Style::default().fg(theme.title).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(format!("  {}Network", ic.res_network), Style::default().fg(theme.title).add_modifier(Modifier::BOLD))),
         Line::from(vec![
             Span::styled("  RX: ", Style::default().fg(theme.dim)),
             Span::styled(net_r, Style::default().fg(theme.cyan)),
@@ -1001,7 +1010,7 @@ fn draw_resources(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui
 
     // PIDs
     let pids_summary = Paragraph::new(vec![
-        Line::from(Span::styled("  PIDs", Style::default().fg(theme.title).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(format!("  {}PIDs", ic.res_pids), Style::default().fg(theme.title).add_modifier(Modifier::BOLD))),
         Line::from(Span::styled(format!("  {}", pids_str), Style::default().fg(theme.text))),
     ]);
     frame.render_widget(pids_summary, summary_cols[4]);
@@ -1277,10 +1286,13 @@ fn draw_logs(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::lay
 }
 
 fn draw_action_menu(frame: &mut Frame, app: &App, theme: &Theme) {
+    use crate::app::ContainerAction;
+
     let menu = match app.action_menu {
         Some(ref m) => m,
         None => return,
     };
+    let ic = crate::icons::get_icons(&app.settings.icon_style);
 
     let container_name = app
         .containers
@@ -1290,9 +1302,10 @@ fn draw_action_menu(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let title = format!(" {} ", container_name);
 
-    // Size the popup: width based on longest label, height based on item count
+    // Size the popup: wider when icons are shown to keep labels readable
     let item_count = menu.actions.len() as u16;
-    let menu_width: u16 = 26;
+    let icons_active = !ic.action_details.is_empty();
+    let menu_width: u16 = if icons_active { 30 } else { 26 };
     let menu_height = item_count + 2; // +2 for borders
 
     // Center the popup
@@ -1325,7 +1338,19 @@ fn draw_action_menu(frame: &mut Frame, app: &App, theme: &Theme) {
         .enumerate()
         .map(|(i, action)| {
             let is_selected = i == menu.selected;
-            let label = format!(" {} ", action.label());
+            let icon = match action {
+                ContainerAction::Details  => ic.action_details,
+                ContainerAction::Logs     => ic.action_logs,
+                ContainerAction::Exec     => ic.action_exec,
+                ContainerAction::Start    => ic.action_start,
+                ContainerAction::Stop     => ic.action_stop,
+                ContainerAction::Restart  => ic.action_restart,
+                ContainerAction::Pause    => ic.action_pause,
+                ContainerAction::Unpause  => ic.action_unpause,
+                ContainerAction::Kill     => ic.action_kill,
+                ContainerAction::Remove   => ic.action_remove,
+            };
+            let label = format!(" {}{} ", icon, action.label());
             if is_selected {
                 Line::from(Span::styled(
                     label,
@@ -1408,6 +1433,43 @@ fn draw_info_popup(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(paragraph, inner);
 }
 
+fn draw_quit_confirm(frame: &mut Frame, theme: &Theme) {
+    let popup_width: u16 = 44;
+    let popup_height: u16 = 6;
+    let area = frame.area();
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = ratatui::layout::Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Quit WhaleTop? ",
+            Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.bg));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " Press q or Esc again to quit",
+            Style::default().fg(theme.text),
+        )),
+        Line::default(),
+        Line::from(Span::styled(
+            " Any other key to cancel",
+            Style::default().fg(theme.dim),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// Render a single settings row (label + value selector).
 fn settings_row<'a>(label: &str, value: &str, selected: bool, editing: bool, theme: &Theme) -> Line<'a> {
     let value_display = if editing {
@@ -1463,41 +1525,44 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     let on_off = |v: bool| if v { "On" } else { "Off" };
     let sel = app.settings_selection;
     let editing = app.settings_editing;
+    let ic = crate::icons::get_icons(&app.settings.icon_style);
 
     // ── Build data for each section ──
 
-    let general: Vec<(&str, String)> = vec![
-        ("Aggregation Mode", app.settings.aggregation_mode.label().to_string()),
-        ("Aggregation Window", app.settings.aggregation_window.label()),
-        ("Color Theme", app.settings.theme.label().to_string()),
-        ("Refresh Rate", app.settings.refresh_rate.label().to_string()),
-        ("Log Buffer Size", app.settings.log_buffer_size.label().to_string()),
-        ("Poll All Containers", on_off(app.settings.poll_all_containers).to_string()),
+    let general: Vec<(String, String)> = vec![
+        (format!("{}Aggregation Mode", ic.row_aggregation_mode), app.settings.aggregation_mode.label().to_string()),
+        (format!("{}Aggregation Window", ic.row_aggregation_window), app.settings.aggregation_window.label()),
+        (format!("{}Color Theme", ic.row_theme), crate::theme::find_by_id(&app.themes, &app.settings.theme).name.clone()),
+        (format!("{}Refresh Rate", ic.row_refresh), app.settings.refresh_rate.label().to_string()),
+        (format!("{}Log Buffer Size", ic.row_log_buffer), app.settings.log_buffer_size.label().to_string()),
+        (format!("{}Poll All Containers", ic.row_poll_all), on_off(app.settings.poll_all_containers).to_string()),
+        (format!("{}Icons", ic.row_icons), app.settings.icon_style.label().to_string()),
+        (format!("{}Confirm Quit", ic.row_confirm_quit), on_off(app.settings.confirm_quit).to_string()),
     ];
 
-    let sorting: Vec<(&str, String)> = vec![
-        ("Sort By", app.settings.sort_by.label().to_string()),
+    let sorting: Vec<(String, String)> = vec![
+        (format!("{}Sort By", ic.row_sort), app.settings.sort_by.label().to_string()),
     ];
 
-    let logs: Vec<(&str, String)> = vec![
-        ("Log Colors", on_off(app.settings.log_color).to_string()),
+    let logs: Vec<(String, String)> = vec![
+        (format!("{}Log Colors", ic.row_log_color), on_off(app.settings.log_color).to_string()),
     ];
 
-    let mut columns: Vec<(&str, String)> = Vec::new();
+    let mut columns: Vec<(String, String)> = Vec::new();
     for i in 0..ColumnVisibility::COUNT {
         columns.push((
-            ColumnVisibility::column_label(i),
+            ColumnVisibility::column_label(i).to_string(),
             on_off(app.settings.columns.is_visible(i)).to_string(),
         ));
     }
 
-    let bars: Vec<(&str, String)> = vec![
-        ("Bar Style", app.settings.bar_style.label().to_string()),
-        ("Graph Style", app.settings.graph_style.label().to_string()),
-        ("CPU", on_off(app.settings.show_cpu_bar).to_string()),
-        ("MEM", on_off(app.settings.show_mem_bar).to_string()),
-        ("Disk", on_off(app.settings.show_disk_bar).to_string()),
-        ("Network", on_off(app.settings.show_network_bar).to_string()),
+    let bars: Vec<(String, String)> = vec![
+        (format!("{}Bar Style", ic.row_bar_style), app.settings.bar_style.label().to_string()),
+        (format!("{}Graph Style", ic.row_graph_style), app.settings.graph_style.label().to_string()),
+        (format!("{}CPU", ic.row_cpu_bar), on_off(app.settings.show_cpu_bar).to_string()),
+        (format!("{}MEM", ic.row_mem_bar), on_off(app.settings.show_mem_bar).to_string()),
+        (format!("{}Disk", ic.row_disk_bar), on_off(app.settings.show_disk_bar).to_string()),
+        (format!("{}Network", ic.row_network_bar), on_off(app.settings.show_network_bar).to_string()),
     ];
 
     // ── Layout: outer block, then two columns with gap ──
@@ -1537,7 +1602,7 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     .split(left_col);
 
     // General box (index 0)
-    let general_block = padded_spark_block("General", theme);
+    let general_block = padded_spark_block(&format!("{}General", ic.sec_general), theme);
     let general_inner = general_block.inner(left_sections[0]);
     frame.render_widget(general_block, left_sections[0]);
 
@@ -1545,14 +1610,15 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .iter()
         .enumerate()
         .map(|(i, (label, value))| {
-            let is_sel = sel == i;
-            settings_row(label, value, is_sel, is_sel && editing, theme)
+            let flat_idx = [0, 1, 2, 3, 4, 5, 22, 23][i];
+            let is_sel = sel == flat_idx;
+            settings_row(label.as_str(), value.as_str(), is_sel, is_sel && editing, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(general_lines), general_inner);
 
     // Sorting box (index 2, after spacer)
-    let sorting_block = padded_spark_block("Sorting", theme);
+    let sorting_block = padded_spark_block(&format!("{}Sorting", ic.sec_sorting), theme);
     let sorting_inner = sorting_block.inner(left_sections[2]);
     frame.render_widget(sorting_block, left_sections[2]);
 
@@ -1561,13 +1627,13 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .enumerate()
         .map(|(i, (label, value))| {
             let is_sel = sel == 19 + i;
-            settings_row(label, value, is_sel, is_sel && editing, theme)
+            settings_row(label.as_str(), value.as_str(), is_sel, is_sel && editing, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(sorting_lines), sorting_inner);
 
     // Logs box (index 4, after spacer)
-    let logs_block = padded_spark_block("Logs", theme);
+    let logs_block = padded_spark_block(&format!("{}Logs", ic.sec_logs), theme);
     let logs_inner = logs_block.inner(left_sections[4]);
     frame.render_widget(logs_block, left_sections[4]);
 
@@ -1576,14 +1642,14 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .enumerate()
         .map(|(i, (label, value))| {
             let is_sel = sel == 18 + i;
-            settings_row(label, value, is_sel, is_sel && editing, theme)
+            settings_row(label.as_str(), value.as_str(), is_sel, is_sel && editing, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(logs_lines), logs_inner);
 
     // ── About box (index 6, after spacer) ──
     if left_sections[6].height >= 4 {
-        let about_block = padded_spark_block("About", theme);
+        let about_block = padded_spark_block(&format!("{}About", ic.sec_about), theme);
         let about_inner = about_block.inner(left_sections[6]);
         frame.render_widget(about_block, left_sections[6]);
 
@@ -1652,7 +1718,7 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
     .split(right_col);
 
     // Columns box (index 0)
-    let columns_block = padded_spark_block("Columns", theme);
+    let columns_block = padded_spark_block(&format!("{}Columns", ic.sec_columns), theme);
     let columns_inner = columns_block.inner(right_sections[0]);
     frame.render_widget(columns_block, right_sections[0]);
 
@@ -1660,15 +1726,15 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .iter()
         .enumerate()
         .map(|(i, (label, value))| {
-            let short = label.strip_prefix("Column: ").unwrap_or(label);
+            let short = label.strip_prefix("Column: ").unwrap_or(label.as_str());
             let is_sel = sel == 6 + i;
-            settings_row(short, value, is_sel, is_sel && editing, theme)
+            settings_row(short, value.as_str(), is_sel, is_sel && editing, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(columns_lines), columns_inner);
 
     // Mini Bars box (index 2, after spacer)
-    let bars_block = padded_spark_block("Mini Bars", theme);
+    let bars_block = padded_spark_block(&format!("{}Mini Bars", ic.sec_minibars), theme);
     let bars_inner = bars_block.inner(right_sections[2]);
     frame.render_widget(bars_block, right_sections[2]);
 
@@ -1679,7 +1745,7 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
         .enumerate()
         .map(|(i, (label, value))| {
             let is_sel = sel == bars_flat_idx[i];
-            settings_row(label, value, is_sel, is_sel && editing, theme)
+            settings_row(label.as_str(), value.as_str(), is_sel, is_sel && editing, theme)
         })
         .collect();
     frame.render_widget(Paragraph::new(bars_lines), bars_inner);

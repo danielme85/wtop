@@ -34,42 +34,6 @@ impl AggregationMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ThemeName {
-    Norse,
-    Light,
-    Dark,
-    Mono,
-}
-
-impl ThemeName {
-    pub fn label(self) -> &'static str {
-        match self {
-            ThemeName::Norse => "Norse",
-            ThemeName::Light => "Light",
-            ThemeName::Dark => "Dark",
-            ThemeName::Mono => "Monochrome",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            ThemeName::Norse => ThemeName::Light,
-            ThemeName::Light => ThemeName::Dark,
-            ThemeName::Dark => ThemeName::Mono,
-            ThemeName::Mono => ThemeName::Norse,
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        match self {
-            ThemeName::Norse => ThemeName::Mono,
-            ThemeName::Light => ThemeName::Norse,
-            ThemeName::Dark => ThemeName::Light,
-            ThemeName::Mono => ThemeName::Dark,
-        }
-    }
-}
 
 /// Refresh rate options in milliseconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +380,41 @@ impl GraphStyle {
     }
 }
 
+/// Icon style for the UI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IconStyle {
+    #[default]
+    None,
+    Emoji,
+    NerdFonts,
+}
+
+impl IconStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            IconStyle::None => "None",
+            IconStyle::Emoji => "Emoji",
+            IconStyle::NerdFonts => "Nerd Fonts",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            IconStyle::None => IconStyle::Emoji,
+            IconStyle::Emoji => IconStyle::NerdFonts,
+            IconStyle::NerdFonts => IconStyle::None,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            IconStyle::None => IconStyle::NerdFonts,
+            IconStyle::Emoji => IconStyle::None,
+            IconStyle::NerdFonts => IconStyle::Emoji,
+        }
+    }
+}
+
 /// Sort order for the container list.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortBy {
@@ -471,7 +470,7 @@ impl SortBy {
 pub struct Settings {
     pub aggregation_mode: AggregationMode,
     pub aggregation_window: AggregationWindow,
-    pub theme: ThemeName,
+    pub theme: String,
     pub refresh_rate: RefreshRate,
     pub log_buffer_size: LogBufferSize,
     #[serde(default)]
@@ -494,6 +493,10 @@ pub struct Settings {
     pub log_color: bool,
     #[serde(default)]
     pub sort_by: SortBy,
+    #[serde(default)]
+    pub icon_style: IconStyle,
+    #[serde(default = "default_true")]
+    pub confirm_quit: bool,
 }
 
 fn default_true() -> bool {
@@ -505,7 +508,7 @@ impl Default for Settings {
         Self {
             aggregation_mode: AggregationMode::Average,
             aggregation_window: AggregationWindow::default(),
-            theme: ThemeName::Norse,
+            theme: "norse".to_string(),
             refresh_rate: RefreshRate::Ms250,
             log_buffer_size: LogBufferSize::Lines200,
             poll_all_containers: false,
@@ -518,6 +521,8 @@ impl Default for Settings {
             graph_style: GraphStyle::default(),
             log_color: true,
             sort_by: SortBy::default(),
+            icon_style: IconStyle::default(),
+            confirm_quit: true,
         }
     }
 }
@@ -582,16 +587,6 @@ mod tests {
         assert_eq!(AggregationMode::Average.prev(), AggregationMode::Last);
         assert_eq!(AggregationMode::Last.prev(), AggregationMode::Max);
         assert_eq!(AggregationMode::Max.prev(), AggregationMode::Average);
-    }
-
-    #[test]
-    fn theme_cycles_both_directions() {
-        // forward wraps: Norse → Light → Dark → Mono → Norse
-        let themes = [ThemeName::Norse, ThemeName::Light, ThemeName::Dark, ThemeName::Mono];
-        for i in 0..themes.len() {
-            assert_eq!(themes[i].next(), themes[(i + 1) % themes.len()]);
-            assert_eq!(themes[(i + 1) % themes.len()].prev(), themes[i]);
-        }
     }
 
     #[test]
