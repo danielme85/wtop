@@ -6,6 +6,7 @@ WORKDIR /usr/src/wtop
 COPY Cargo.toml Cargo.lock* ./
 COPY build.rs ./
 COPY src/ src/
+COPY themes/ themes/
 ENV GIT_HASH=${GIT_HASH}
 ENV GIT_BRANCH=${GIT_BRANCH}
 RUN cargo build --release
