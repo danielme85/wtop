@@ -1,0 +1,14 @@
+name        = "Norse"
+description = "Ocean blue borders with amber titles on black"
+
+[colors]
+border  = "#1e3c72"
+title   = "#daa520"
+bg      = "#000000"
+text    = "#bdc3c7"
+running = "#50c878"
+stopped = "#e74c3c"
+dim     = "#646478"
+cyan    = "#3498db"
+purple  = "#9b59b6"
+accent  = "#daa520"

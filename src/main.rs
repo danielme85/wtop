@@ -1,6 +1,7 @@
 mod aggregation;
 mod app;
 mod docker_client;
+mod icons;
 mod settings;
 mod theme;
 mod ui;
@@ -66,7 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let (settings, settings_warning) = settings::Settings::load_with_warning();
-    let mut app = app::App::new(settings);
+    let themes = theme::load_all();
+    let mut app = app::App::new(settings, themes);
     if let Some(msg) = settings_warning {
         app.info_popup = Some(msg);
     }
@@ -204,7 +206,7 @@ fn check_poll_all_hint(app: &mut app::App) {
 /// Grid is addressed as (column, row_within_column).
 /// These helpers convert between the flat selection index and grid position.
 /// Left-column flat indices in display order.
-const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 19, 18];
+const LEFT_COL: &[usize] = &[0, 1, 2, 3, 4, 5, 22, 23, 19, 18];
 /// Right-column flat indices in display order.
 const RIGHT_COL: &[usize] = &[6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 14, 15, 16, 17];
 
@@ -237,11 +239,14 @@ fn adjust_setting(app: &mut app::App, forward: bool) {
         },
         1 => if forward { app.settings.aggregation_window.increment() }
              else { app.settings.aggregation_window.decrement() },
-        2 => app.settings.theme = if forward {
-            app.settings.theme.next()
-        } else {
-            app.settings.theme.prev()
-        },
+        2 => {
+            let n = app.themes.len();
+            if n > 0 {
+                let cur = app.themes.iter().position(|t| t.id.eq_ignore_ascii_case(&app.settings.theme)).unwrap_or(0);
+                let next = if forward { (cur + 1) % n } else { (cur + n - 1) % n };
+                app.settings.theme = app.themes[next].id.clone();
+            }
+        }
         3 => app.settings.refresh_rate = if forward {
             app.settings.refresh_rate.next()
         } else {
@@ -280,11 +285,26 @@ fn adjust_setting(app: &mut app::App, forward: bool) {
         } else {
             app.settings.graph_style.prev()
         },
+        22 => app.settings.icon_style = if forward {
+            app.settings.icon_style.next()
+        } else {
+            app.settings.icon_style.prev()
+        },
+        23 => app.settings.confirm_quit = !app.settings.confirm_quit,
         _ => {}
     }
     app.settings.save();
     if matches!(app.settings_selection, 14..=17) {
         check_poll_all_hint(app);
+    }
+}
+
+/// Trigger quit — shows confirm dialog if the setting is on.
+fn try_quit(app: &mut app::App) {
+    if app.settings.confirm_quit {
+        app.quit_confirm = true;
+    } else {
+        app.quit();
     }
 }
 
@@ -535,8 +555,14 @@ async fn run_loop(
         let timeout = Duration::from_millis(50);
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                // Quit-confirm dialog takes top priority
+                if app.quit_confirm {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('y') => app.quit(),
+                        _ => app.quit_confirm = false,
+                    }
                 // Info popup takes priority when open
-                if app.info_popup.is_some() {
+                } else if app.info_popup.is_some() {
                     match key.code {
                         KeyCode::Esc | KeyCode::Enter => {
                             app.info_popup = None;
@@ -547,12 +573,12 @@ async fn run_loop(
                 } else if app.action_menu.is_some() {
                     match key.code {
                         KeyCode::Esc => app.close_action_menu(),
-                        KeyCode::Up => {
+                        KeyCode::Up | KeyCode::Char('k') => {
                             if let Some(ref mut menu) = app.action_menu {
                                 menu.select_prev();
                             }
                         }
-                        KeyCode::Down => {
+                        KeyCode::Down | KeyCode::Char('j') => {
                             if let Some(ref mut menu) = app.action_menu {
                                 menu.select_next();
                             }
@@ -600,7 +626,23 @@ async fn run_loop(
                         _ => {}
                     }
                 } else if key.code == KeyCode::Char('q') {
-                    app.quit();
+                    try_quit(app);
+                } else if key.code == KeyCode::Esc && app.page != Page::Settings {
+                    // Esc: go back one level, or quit from the list
+                    match app.page {
+                        Page::List => try_quit(app),
+                        Page::Detail => app.set_page(Page::List),
+                        Page::Resources => app.set_page(Page::Detail),
+                        Page::Logs => {
+                            if app.log_search_active {
+                                app.log_search_active = false;
+                            } else {
+                                app.set_page(Page::Resources);
+                                app.auto_scroll = true;
+                            }
+                        }
+                        Page::Settings => unreachable!(),
+                    }
                 } else if key.code == KeyCode::Char('s') && app.page != Page::Settings {
                     // Global 's' opens settings from any page
                     app.previous_page = Some(app.page);
@@ -620,8 +662,12 @@ async fn run_loop(
                                 app.settings.save();
                                 app.set_status(format!("Sort: {}", app.settings.sort_by.label()));
                             }
-                            KeyCode::Up => app.select_prev(),
-                            KeyCode::Down => app.select_next(),
+                            KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
+                            KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                            KeyCode::Home => app.selected = 0,
+                            KeyCode::End => {
+                                app.selected = app.containers.len().saturating_sub(1);
+                            }
                             KeyCode::Enter => {
                                 if app.selected_container_id().is_some() {
                                     app.open_action_menu();
@@ -653,10 +699,10 @@ async fn run_loop(
                             KeyCode::Right => {
                                 app.set_page(Page::Resources);
                             }
-                            KeyCode::Up => {
+                            KeyCode::Up | KeyCode::Char('k') => {
                                 app.detail_scroll = app.detail_scroll.saturating_sub(1);
                             }
-                            KeyCode::Down => {
+                            KeyCode::Down | KeyCode::Char('j') => {
                                 app.detail_scroll = app.detail_scroll.saturating_add(1);
                             }
                             KeyCode::Enter => {
@@ -672,6 +718,18 @@ async fn run_loop(
                             }
                             KeyCode::PageDown => {
                                 app.select_next();
+                                if let Some(docker) = docker {
+                                    load_container_data(app, docker).await;
+                                }
+                            }
+                            KeyCode::Home => {
+                                app.selected = 0;
+                                if let Some(docker) = docker {
+                                    load_container_data(app, docker).await;
+                                }
+                            }
+                            KeyCode::End => {
+                                app.selected = app.containers.len().saturating_sub(1);
                                 if let Some(docker) = docker {
                                     load_container_data(app, docker).await;
                                 }
@@ -702,16 +760,25 @@ async fn run_loop(
                                     load_container_data(app, docker).await;
                                 }
                             }
+                            KeyCode::Home => {
+                                app.selected = 0;
+                                if let Some(docker) = docker {
+                                    load_container_data(app, docker).await;
+                                }
+                            }
+                            KeyCode::End => {
+                                app.selected = app.containers.len().saturating_sub(1);
+                                if let Some(docker) = docker {
+                                    load_container_data(app, docker).await;
+                                }
+                            }
                             _ => {}
                         },
                         Page::Logs => {
                             // Search input mode takes priority
                             if app.log_search_active {
                                 match key.code {
-                                    KeyCode::Esc => {
-                                        app.log_search_active = false;
-                                    }
-                                    KeyCode::Enter => {
+                                    KeyCode::Esc | KeyCode::Enter => {
                                         app.log_search_active = false;
                                     }
                                     KeyCode::Backspace => {
@@ -739,11 +806,11 @@ async fn run_loop(
                                         app.set_page(Page::List);
                                         app.auto_scroll = true;
                                     }
-                                    KeyCode::Up => {
+                                    KeyCode::Up | KeyCode::Char('k') => {
                                         app.auto_scroll = false;
                                         app.log_scroll = app.log_scroll.saturating_sub(1);
                                     }
-                                    KeyCode::Down => {
+                                    KeyCode::Down | KeyCode::Char('j') => {
                                         app.auto_scroll = false;
                                         app.log_scroll = app.log_scroll.saturating_add(1);
                                     }
@@ -761,6 +828,20 @@ async fn run_loop(
                                     }
                                     KeyCode::PageDown => {
                                         app.select_next();
+                                        app.auto_scroll = true;
+                                        if let Some(docker) = docker {
+                                            load_container_data(app, docker).await;
+                                        }
+                                    }
+                                    KeyCode::Home => {
+                                        app.selected = 0;
+                                        app.auto_scroll = true;
+                                        if let Some(docker) = docker {
+                                            load_container_data(app, docker).await;
+                                        }
+                                    }
+                                    KeyCode::End => {
+                                        app.selected = app.containers.len().saturating_sub(1);
                                         app.auto_scroll = true;
                                         if let Some(docker) = docker {
                                             load_container_data(app, docker).await;

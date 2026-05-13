@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::settings::Settings;
-use crate::theme::Theme;
+use crate::theme::{self, Theme};
 
 /// Max number of history samples to keep for sparkline graphs.
 /// Sized to cover wide terminals (up to ~300 columns).
@@ -357,6 +357,7 @@ pub enum Page {
 
 /// Application state for the TUI.
 pub struct App {
+    pub themes: Vec<Theme>,
     pub containers: Vec<ContainerInfo>,
     pub running: bool,
     pub selected: usize,
@@ -396,11 +397,14 @@ pub struct App {
     pub log_search_active: bool,
     /// Log search query string.
     pub log_search_query: String,
+    /// Whether the quit-confirmation dialog is showing.
+    pub quit_confirm: bool,
 }
 
 impl App {
-    pub fn new(settings: Settings) -> Self {
+    pub fn new(settings: Settings, themes: Vec<Theme>) -> Self {
         Self {
+            themes,
             containers: Vec::new(),
             running: true,
             selected: 0,
@@ -426,6 +430,7 @@ impl App {
             pending_exec: None,
             log_search_active: false,
             log_search_query: String::new(),
+            quit_confirm: false,
         }
     }
 
@@ -436,7 +441,7 @@ impl App {
     }
 
     pub fn active_theme(&self) -> Theme {
-        Theme::from_name(self.settings.theme)
+        theme::find_by_id(&self.themes, &self.settings.theme).clone()
     }
 
     /// Open the action menu for the currently selected container.

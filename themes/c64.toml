@@ -1,0 +1,14 @@
+name        = "C64"
+description = "Commodore 64 terminal — light blue on dark blue"
+
+[colors]
+border  = "#5555ff"
+title   = "#ffffff"
+bg      = "#0000aa"
+text    = "#aaaaff"
+running = "#55aa55"
+stopped = "#aa5555"
+dim     = "#3333aa"
+cyan    = "#55ffff"
+purple  = "#aa55ff"
+accent  = "#ffffff"

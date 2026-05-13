@@ -1,0 +1,14 @@
+name        = "Dark"
+description = "Muted dark theme with subtle blue-grey borders"
+
+[colors]
+border  = "#465a8c"
+title   = "#b48c3c"
+bg      = "#14141e"
+text    = "#a0a5aa"
+running = "#3cb464"
+stopped = "#c84637"
+dim     = "#505064"
+cyan    = "#288bbe"
+purple  = "#8c4ba5"
+accent  = "#b48c3c"

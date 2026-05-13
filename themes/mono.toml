@@ -1,0 +1,14 @@
+name        = "Monochrome"
+description = "Black and white, no colour"
+
+[colors]
+border  = "#808080"
+title   = "#ffffff"
+bg      = "#000000"
+text    = "#808080"
+running = "#ffffff"
+stopped = "#404040"
+dim     = "#404040"
+cyan    = "#808080"
+purple  = "#808080"
+accent  = "#ffffff"

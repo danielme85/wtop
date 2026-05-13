@@ -1,0 +1,14 @@
+name        = "Matrix"
+description = "Green phosphor on black — follow the white rabbit"
+
+[colors]
+border  = "#004400"
+title   = "#00ff00"
+bg      = "#000000"
+text    = "#00cc00"
+running = "#00ff00"
+stopped = "#006600"
+dim     = "#003300"
+cyan    = "#00cc88"
+purple  = "#00aa44"
+accent  = "#00ff00"

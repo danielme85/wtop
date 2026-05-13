@@ -1,0 +1,14 @@
+name        = "Light"
+description = "Light background for bright environments"
+
+[colors]
+border  = "#3232c8"
+title   = "#1e1e1e"
+bg      = "#f5f5f5"
+text    = "#282828"
+running = "#009632"
+stopped = "#c83232"
+dim     = "#8c8c8c"
+cyan    = "#0078b4"
+purple  = "#823ca0"
+accent  = "#3232c8"
