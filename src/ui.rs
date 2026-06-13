@@ -1112,7 +1112,12 @@ enum LogLevel {
 /// Detect log level from a line by scanning for common keywords.
 fn detect_log_level(line: &str) -> LogLevel {
     // Scan only the first ~120 chars (level keywords appear early in the line)
-    let prefix: &str = if line.len() > 120 { &line[..120] } else { line };
+    let prefix: &str = if line.len() > 120 {
+        let end = (0..=120).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
+        &line[..end]
+    } else {
+        line
+    };
     let upper = prefix.to_ascii_uppercase();
 
     // Check for common level patterns: "ERROR", "ERR", "FATAL", "PANIC",
