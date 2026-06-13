@@ -41,6 +41,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_action_menu(frame, app, &theme);
     }
 
+    // Exec shell selection submenu (shown on top of action menu result)
+    if app.exec_shell_menu.is_some() {
+        draw_exec_shell_menu(frame, app, &theme);
+    }
+
     // Info popup (rendered on top of everything)
     if app.info_popup.is_some() {
         draw_info_popup(frame, app, &theme);
@@ -1351,6 +1356,70 @@ fn draw_action_menu(frame: &mut Frame, app: &App, theme: &Theme) {
                 ContainerAction::Remove   => ic.action_remove,
             };
             let label = format!(" {}{} ", icon, action.label());
+            if is_selected {
+                Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::White)
+                        .bg(theme.border)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::styled(label, Style::default().fg(theme.text)))
+            }
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, inner);
+}
+
+fn draw_exec_shell_menu(frame: &mut Frame, app: &App, theme: &Theme) {
+    use crate::app::EXEC_SHELLS;
+
+    let menu = match app.exec_shell_menu {
+        Some(ref m) => m,
+        None => return,
+    };
+
+    let title = " Select Shell ";
+    let hint = " ↑↓/jk  Enter  Esc ";
+
+    let shell_count = EXEC_SHELLS.len() as u16;
+    let popup_width: u16 = 32;
+    // items + title border + hint line + bottom border
+    let popup_height = shell_count + 4;
+
+    let area = frame.area();
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = ratatui::layout::Rect::new(x, y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            hint,
+            Style::default().fg(theme.border),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.bg));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let lines: Vec<Line> = EXEC_SHELLS
+        .iter()
+        .enumerate()
+        .map(|(i, (path, short))| {
+            let is_selected = i == menu.selected;
+            let label = format!("  {:<10}  {}", short, path);
             if is_selected {
                 Line::from(Span::styled(
                     label,
