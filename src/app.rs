@@ -310,9 +310,42 @@ impl ContainerAction {
             ContainerAction::Kill => "Kill",
             ContainerAction::Details => "Details",
             ContainerAction::Logs => "Logs",
-            ContainerAction::Exec => "Exec (sh)",
+            ContainerAction::Exec => "Exec Shell",
             ContainerAction::Remove => "Remove",
         }
+    }
+}
+
+/// Common shells to offer in the exec shell selection menu.
+pub const EXEC_SHELLS: &[(&str, &str)] = &[
+    ("/bin/bash",        "bash"),
+    ("/bin/sh",          "sh"),
+    ("/bin/zsh",         "zsh"),
+    ("/bin/fish",        "fish"),
+    ("/usr/bin/python3", "python3"),
+];
+
+/// State for the exec shell selection submenu.
+pub struct ExecShellMenu {
+    pub container_id: String,
+    pub selected: usize,
+}
+
+impl ExecShellMenu {
+    pub fn new(container_id: String) -> Self {
+        Self { container_id, selected: 0 }
+    }
+
+    pub fn select_next(&mut self) {
+        self.selected = (self.selected + 1).min(EXEC_SHELLS.len() - 1);
+    }
+
+    pub fn select_prev(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn selected_shell(&self) -> &str {
+        EXEC_SHELLS[self.selected].0
     }
 }
 
@@ -391,8 +424,10 @@ pub struct App {
     pub needs_clear: bool,
     /// Informational popup message (dismissed with Esc/Enter).
     pub info_popup: Option<String>,
-    /// Container ID to exec into (set by handle_action, consumed by run_loop).
-    pub pending_exec: Option<String>,
+    /// Shell selection submenu shown after choosing Exec from the action menu.
+    pub exec_shell_menu: Option<ExecShellMenu>,
+    /// Container ID and shell path to exec into (set by shell menu, consumed by run_loop).
+    pub pending_exec: Option<(String, String)>,
     /// Log search: whether the search input is active.
     pub log_search_active: bool,
     /// Log search query string.
@@ -427,6 +462,7 @@ impl App {
             all_stats: HashMap::new(),
             needs_clear: false,
             info_popup: None,
+            exec_shell_menu: None,
             pending_exec: None,
             log_search_active: false,
             log_search_query: String::new(),
