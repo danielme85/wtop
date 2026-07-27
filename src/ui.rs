@@ -496,9 +496,18 @@ fn draw_container_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: ra
         }
     }
 
+    let mut block = content_block("Containers", theme);
+    let indicator_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
+    if app.list_offset > 0 {
+        block = block.title_top(Line::styled(" ▲ ", indicator_style).right_aligned());
+    }
+    if visible_end < display_rows.len() {
+        block = block.title_bottom(Line::styled(" ▼ ", indicator_style).right_aligned());
+    }
+
     let table = Table::new(rows, constraints)
         .header(header_row)
-        .block(content_block("Containers", theme));
+        .block(block);
 
     frame.render_widget(table, area);
 }
