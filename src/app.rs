@@ -394,6 +394,8 @@ pub struct App {
     pub containers: Vec<ContainerInfo>,
     pub running: bool,
     pub selected: usize,
+    /// First visible container row index in the list view (for scrolling).
+    pub list_offset: usize,
     pub page: Page,
     pub logs: Vec<String>,
     pub log_scroll: u16,
@@ -443,6 +445,7 @@ impl App {
             containers: Vec::new(),
             running: true,
             selected: 0,
+            list_offset: 0,
             page: Page::List,
             logs: Vec::new(),
             log_scroll: 0,

@@ -200,7 +200,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
     frame.render_widget(footer, area);
 }
 
-fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layout::Rect) {
+fn draw_container_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::layout::Rect) {
     let cols = &app.settings.columns;
     let ic = crate::icons::get_icons(&app.settings.icon_style);
     let header_style = Style::default()
@@ -278,11 +278,16 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
     let header_row = Row::new(headers).height(1);
     let col_count = constraints.len();
 
-    let mut rows: Vec<Row> = Vec::new();
+    // Build the full logical row list (group headers + container rows) so
+    // scrolling can be computed against actual rendered rows, not just
+    // container count (group headers take up rows too).
+    enum ListRow<'a> {
+        GroupHeader(&'a str),
+        Item(usize),
+    }
+    let mut display_rows: Vec<ListRow> = Vec::new();
     let mut last_project: Option<Option<&str>> = None;
-
     for (i, c) in app.containers.iter().enumerate() {
-        // Insert compose project group header when sorting by compose project
         if app.settings.sort_by == SortBy::ComposeProject {
             let current_project = c.compose_project.as_deref();
             let show_header = match last_project {
@@ -290,7 +295,43 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                 Some(ref prev) => *prev != current_project,
             };
             if show_header {
-                let label = current_project.unwrap_or("(no project)");
+                display_rows.push(ListRow::GroupHeader(current_project.unwrap_or("(no project)")));
+                last_project = Some(current_project);
+            }
+        }
+        display_rows.push(ListRow::Item(i));
+    }
+
+    let selected_row_pos = display_rows
+        .iter()
+        .position(|r| matches!(r, ListRow::Item(idx) if *idx == app.selected))
+        .unwrap_or(0);
+
+    // Keep the selected row within view: adjust the scroll offset so it never
+    // scrolls past the top/bottom of the list on small screens.
+    let visible_rows = area.height.saturating_sub(3) as usize; // borders (2) + header (1)
+    if visible_rows > 0 {
+        if selected_row_pos < app.list_offset {
+            app.list_offset = selected_row_pos;
+        } else if selected_row_pos >= app.list_offset + visible_rows {
+            app.list_offset = selected_row_pos + 1 - visible_rows;
+        }
+        let max_offset = display_rows.len().saturating_sub(visible_rows);
+        app.list_offset = app.list_offset.min(max_offset);
+    } else {
+        app.list_offset = 0;
+    }
+    let visible_end = if visible_rows > 0 {
+        (app.list_offset + visible_rows).min(display_rows.len())
+    } else {
+        display_rows.len()
+    };
+
+    let mut rows: Vec<Row> = Vec::new();
+
+    for list_row in &display_rows[app.list_offset..visible_end] {
+        let (i, c) = match list_row {
+            ListRow::GroupHeader(label) => {
                 let sep_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
                 let mut header_cells: Vec<Cell> = Vec::with_capacity(col_count);
                 // Fill each column: put "──" in the narrow status col,
@@ -308,9 +349,10 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
                     }
                 }
                 rows.push(Row::new(header_cells));
-                last_project = Some(current_project);
+                continue;
             }
-        }
+            ListRow::Item(i) => (*i, &app.containers[*i]),
+        };
 
         {
             let is_selected = i == app.selected;
@@ -454,9 +496,18 @@ fn draw_container_list(frame: &mut Frame, app: &App, theme: &Theme, area: ratatu
         }
     }
 
+    let mut block = content_block("Containers", theme);
+    let indicator_style = Style::default().fg(theme.title).add_modifier(Modifier::BOLD);
+    if app.list_offset > 0 {
+        block = block.title_top(Line::styled(" ▲ ", indicator_style).right_aligned());
+    }
+    if visible_end < display_rows.len() {
+        block = block.title_bottom(Line::styled(" ▼ ", indicator_style).right_aligned());
+    }
+
     let table = Table::new(rows, constraints)
         .header(header_row)
-        .block(content_block("Containers", theme));
+        .block(block);
 
     frame.render_widget(table, area);
 }
