@@ -146,3 +146,10 @@ pub fn find_by_id<'a>(themes: &'a [Theme], id: &str) -> &'a Theme {
         .or_else(|| themes.first())
         .expect("theme list is never empty")
 }
+
+/// The default built-in theme, parsed without touching the filesystem (for tests).
+#[cfg(test)]
+pub fn builtin_default() -> Theme {
+    let (id, content) = BUILTINS[0];
+    parse_theme(id, content).expect("built-in theme parses")
+}

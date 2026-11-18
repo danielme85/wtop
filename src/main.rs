@@ -60,11 +60,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Connect to Docker (fail gracefully if unavailable)
     let mut docker = docker_client::connect().ok();
 
-    // Terminal setup
-    terminal::enable_raw_mode()?;
-    io::stdout().execute(EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    // Terminal setup. `try_init` enables raw mode + the alternate screen and installs a
+    // panic hook that restores the terminal first, so a panic never leaves the user's
+    // shell stuck in raw mode.
+    let mut terminal = ratatui::try_init()?;
 
     let (settings, settings_warning) = settings::Settings::load_with_warning();
     let themes = theme::load_all();
@@ -75,10 +74,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = run_loop(&mut terminal, &mut app, &mut docker).await;
 
-    // Terminal teardown (always runs)
-    terminal::disable_raw_mode()?;
-    io::stdout().execute(LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    // Terminal teardown (always runs, even when run_loop returned an error)
+    ratatui::restore();
 
     result
 }
