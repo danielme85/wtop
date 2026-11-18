@@ -51,6 +51,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_info_popup(frame, app, &theme);
     }
 
+    // Destructive-action confirmation
+    if let Some(ref pending) = app.confirm_action {
+        draw_action_confirm(frame, pending, &theme);
+    }
+
     // Quit-confirm dialog (rendered on very top)
     if app.quit_confirm {
         draw_quit_confirm(frame, &theme);
@@ -164,6 +169,23 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
             frame.render_widget(footer, area);
             return;
         }
+    }
+
+    if let Some(pending) = app.actions_in_flight.values().next() {
+        let more = app.actions_in_flight.len() - 1;
+        let suffix = if more > 0 { format!(" (+{} more)", more) } else { String::new() };
+        let footer = Paragraph::new(Line::from(Span::styled(
+            format!(
+                " {} {}...{} ",
+                pending.action.progress_label(),
+                pending.container_name,
+                suffix
+            ),
+            Style::default().fg(theme.title),
+        )))
+        .style(Style::default().bg(theme.bg));
+        frame.render_widget(footer, area);
+        return;
     }
 
     let help_text = match app.page {
@@ -1624,6 +1646,49 @@ fn draw_quit_confirm(frame: &mut Frame, theme: &Theme) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_action_confirm(frame: &mut Frame, pending: &crate::app::PendingAction, theme: &Theme) {
+    use crate::app::ContainerAction;
+
+    let (title, warning) = match pending.action {
+        ContainerAction::Remove => (
+            " Remove container? ",
+            "Force-removes it, stopping it first if running.",
+        ),
+        _ => (" Kill container? ", "Sends SIGKILL; the process gets no chance to clean up."),
+    };
+    let name = format!(" {}", pending.container_name);
+    let width = (name.chars().count().max(warning.len()) + 4).clamp(44, 70) as u16;
+    let popup_area = centered_popup(frame.area(), width, 8);
+
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(231, 76, 60)))
+        .style(Style::default().bg(theme.bg));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            name,
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(format!(" {}", warning), Style::default().fg(theme.text))),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(" y", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
+            Span::styled(": confirm", Style::default().fg(theme.text)),
+        ]),
+        Line::from(Span::styled(" Any other key to cancel", Style::default().fg(theme.dim))),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// Render a single settings row (label + value selector).
 fn settings_row<'a>(label: &str, value: &str, selected: bool, editing: bool, theme: &Theme) -> Line<'a> {
     let value_display = if editing {
@@ -2013,6 +2078,11 @@ mod tests {
             app.exec_shell_menu = Some(ExecShellMenu::new("abc".into()));
             app.info_popup = Some("Some info message that wraps over lines".into());
             app.quit_confirm = true;
+            app.confirm_action = Some(crate::app::PendingAction {
+                action: ContainerAction::Remove,
+                container_id: "abc".into(),
+                container_name: "a-container-with-a-rather-long-name".into(),
+            });
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal.draw(|f| draw(f, &mut app)).unwrap();
         }

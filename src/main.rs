@@ -17,6 +17,7 @@ use crossterm::terminal::{
     LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+use tokio::sync::mpsc;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -123,6 +124,7 @@ async fn load_container_data(app: &mut app::App, docker: &bollard::Docker) {
 async fn handle_action(
     app: &mut app::App,
     docker: &mut Option<bollard::Docker>,
+    results: &mpsc::UnboundedSender<ActionOutcome>,
     action: ContainerAction,
 ) {
     // Navigation actions don't need Docker
@@ -169,22 +171,98 @@ async fn handle_action(
         return;
     }
 
-    let result = match action {
-        ContainerAction::Start => docker_client::start_container(docker, &id).await,
-        ContainerAction::Stop => docker_client::stop_container(docker, &id).await,
-        ContainerAction::Restart => docker_client::restart_container(docker, &id).await,
-        ContainerAction::Pause => docker_client::pause_container(docker, &id).await,
-        ContainerAction::Unpause => docker_client::unpause_container(docker, &id).await,
-        ContainerAction::Kill => docker_client::kill_container(docker, &id).await,
-        ContainerAction::Remove => docker_client::remove_container(docker, &id).await,
-        ContainerAction::Details | ContainerAction::Logs | ContainerAction::Exec => {
-            unreachable!()
-        }
-    };
+    let pending = app::PendingAction { action, container_id: id, container_name: name };
+    if action.needs_confirmation() {
+        app.confirm_action = Some(pending);
+    } else {
+        spawn_action(app, docker, results, pending);
+    }
+}
 
+/// Outcome of a background lifecycle action, sent back to the UI loop.
+struct ActionOutcome {
+    pending: app::PendingAction,
+    result: Result<(), String>,
+}
+
+/// Run a lifecycle action on a background task so the UI keeps drawing and handling
+/// input. (A Stop waits up to the container's stop timeout, 10s by default; awaiting it
+/// inline froze the whole TUI for that long.)
+fn spawn_action(
+    app: &mut app::App,
+    docker: &bollard::Docker,
+    results: &mpsc::UnboundedSender<ActionOutcome>,
+    pending: app::PendingAction,
+) {
+    if let Some(running) = app.actions_in_flight.get(&pending.container_id) {
+        app.set_status(format!(
+            "{} {} is still in progress",
+            running.action.progress_label(),
+            running.container_name
+        ));
+        return;
+    }
+    app.set_status(format!(
+        "{} {}...",
+        pending.action.progress_label(),
+        pending.container_name
+    ));
+    app.actions_in_flight.insert(pending.container_id.clone(), pending.clone());
+
+    let docker = docker.clone();
+    let results = results.clone();
+    tokio::spawn(async move {
+        let id = pending.container_id.as_str();
+        let result = match pending.action {
+            ContainerAction::Start => docker_client::start_container(&docker, id).await,
+            ContainerAction::Stop => docker_client::stop_container(&docker, id).await,
+            ContainerAction::Restart => docker_client::restart_container(&docker, id).await,
+            ContainerAction::Pause => docker_client::pause_container(&docker, id).await,
+            ContainerAction::Unpause => docker_client::unpause_container(&docker, id).await,
+            ContainerAction::Kill => docker_client::kill_container(&docker, id).await,
+            ContainerAction::Remove => docker_client::remove_container(&docker, id).await,
+            ContainerAction::Details | ContainerAction::Logs | ContainerAction::Exec => {
+                Err("not a lifecycle action".to_string())
+            }
+        };
+        // The receiver only disappears when wtop is quitting; nothing to report then.
+        let _ = results.send(ActionOutcome { pending, result });
+    });
+}
+
+/// Apply a finished background action to the app state.
+fn apply_action_outcome(app: &mut app::App, outcome: ActionOutcome) {
+    let ActionOutcome { pending, result } = outcome;
+    app.actions_in_flight.remove(&pending.container_id);
     match result {
-        Ok(()) => app.set_status(format!("{}: {}", action.label(), name)),
-        Err(e) => app.set_status(format!("Error: {}", e)),
+        Ok(()) => app.set_status(format!("{}: {}", pending.action.label(), pending.container_name)),
+        Err(e) => app.set_status(format!(
+            "{} {} failed: {}",
+            pending.action.label(),
+            pending.container_name,
+            e
+        )),
+    }
+}
+
+/// When a per-container page is open but its container no longer exists (removed from
+/// wtop or elsewhere), go back to the list instead of showing stale data under another
+/// container's name.
+fn leave_page_if_container_gone(app: &mut app::App) {
+    if !matches!(app.page, Page::Detail | Page::Resources | Page::Logs) {
+        return;
+    }
+    let Some(id) = app.logs_container_id.as_deref() else {
+        return;
+    };
+    if !app.containers.iter().any(|c| c.id == id) {
+        app.logs_container_id = None;
+        app.detail = None;
+        app.stats = None;
+        app.logs.clear();
+        app.log_search_active = false;
+        app.set_page(Page::List);
+        app.set_status("Container no longer exists".to_string());
     }
 }
 
@@ -624,7 +702,18 @@ async fn run_loop(
     // Track consecutive failures to throttle reconnect attempts.
     let mut consecutive_failures: u32 = 0;
 
+    // Background lifecycle actions report back through this channel.
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel::<ActionOutcome>();
+    let mut refresh_now = false;
+
     while app.running {
+        // Apply finished background actions, and refresh right away so the list
+        // reflects the new container state without waiting for the next tick.
+        while let Ok(outcome) = action_rx.try_recv() {
+            apply_action_outcome(app, outcome);
+            refresh_now = true;
+        }
+
         // Force a full redraw when the page changes to prevent visual artifacts
         if app.needs_clear {
             terminal.clear()?;
@@ -645,6 +734,16 @@ async fn run_loop(
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('y') => app.quit(),
                         _ => app.quit_confirm = false,
+                    }
+                // Destructive-action confirmation: only 'y' proceeds
+                } else if let Some(pending) = app.confirm_action.take() {
+                    if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                        match docker {
+                            Some(d) => spawn_action(app, d, &action_tx, pending),
+                            None => app.set_status("No Docker connection".to_string()),
+                        }
+                    } else {
+                        app.set_status(format!("{} cancelled", pending.action.label()));
                     }
                 // Info popup takes priority when open
                 } else if app.info_popup.is_some() {
@@ -692,7 +791,7 @@ async fn run_loop(
                                 .and_then(|m| m.selected_action());
                             app.close_action_menu();
                             if let Some(action) = action {
-                                handle_action(app, docker, action).await;
+                                handle_action(app, docker, &action_tx, action).await;
                             }
                         }
                         _ => {}
@@ -940,7 +1039,8 @@ async fn run_loop(
 
         // Refresh on each tick (dynamic rate from settings)
         let tick_rate = Duration::from_millis(app.settings.refresh_rate.as_millis());
-        if last_tick.elapsed() >= tick_rate {
+        if refresh_now || last_tick.elapsed() >= tick_rate {
+            refresh_now = false;
             // Attempt reconnection if Docker is disconnected
             if docker.is_none() && consecutive_failures < 3 {
                 if let Ok((d, endpoint)) = docker_client::connect() {
@@ -987,6 +1087,7 @@ async fn run_loop(
                 if !app.containers.is_empty() {
                     app.selected = app.selected.min(app.containers.len() - 1);
                 }
+                leave_page_if_container_gone(app);
 
                 // Background stats polling for all containers
                 if app.settings.poll_all_containers {
@@ -1057,6 +1158,86 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use app::{ContainerInfo, ContainerStats};
+
+    // --- destructive-action confirmation & background actions ---
+
+    fn test_app() -> app::App {
+        app::App::new(settings::Settings::default(), vec![theme::builtin_default()])
+    }
+
+    fn pending(action: ContainerAction, id: &str) -> app::PendingAction {
+        app::PendingAction { action, container_id: id.into(), container_name: format!("name-{id}") }
+    }
+
+    fn offline_docker() -> bollard::Docker {
+        // Client construction is lazy; nothing connects to this socket.
+        bollard::Docker::connect_with_http("tcp://127.0.0.1:9", 1, bollard::API_DEFAULT_VERSION)
+            .unwrap()
+    }
+
+    #[test]
+    fn only_kill_and_remove_need_confirmation() {
+        assert!(ContainerAction::Kill.needs_confirmation());
+        assert!(ContainerAction::Remove.needs_confirmation());
+        for a in [ContainerAction::Start, ContainerAction::Stop, ContainerAction::Restart,
+                  ContainerAction::Pause, ContainerAction::Unpause] {
+            assert!(!a.needs_confirmation(), "{:?}", a);
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_from_menu_asks_for_confirmation_instead_of_running() {
+        let mut app = test_app();
+        app.containers = vec![make_container("c1", "web", "Up 1 hour", None)];
+        let mut docker = Some(offline_docker());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_action(&mut app, &mut docker, &tx, ContainerAction::Remove).await;
+        let confirm = app.confirm_action.as_ref().expect("confirmation dialog shown");
+        assert_eq!(confirm.container_id, "c1");
+        assert!(app.actions_in_flight.is_empty(), "nothing may run before 'y'");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn second_action_on_busy_container_is_refused() {
+        let mut app = test_app();
+        app.actions_in_flight.insert("c1".into(), pending(ContainerAction::Stop, "c1"));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        spawn_action(&mut app, &offline_docker(), &tx, pending(ContainerAction::Restart, "c1"));
+        let (msg, _) = app.status_message.as_ref().unwrap();
+        assert!(msg.contains("still in progress"), "{msg}");
+        assert_eq!(app.actions_in_flight["c1"].action, ContainerAction::Stop);
+    }
+
+    #[test]
+    fn finished_action_clears_in_flight_and_reports() {
+        let mut app = test_app();
+        app.actions_in_flight.insert("c1".into(), pending(ContainerAction::Stop, "c1"));
+        apply_action_outcome(&mut app, ActionOutcome {
+            pending: pending(ContainerAction::Stop, "c1"),
+            result: Err("boom".into()),
+        });
+        assert!(app.actions_in_flight.is_empty());
+        assert!(app.status_message.as_ref().unwrap().0.contains("failed: boom"));
+    }
+
+    #[test]
+    fn detail_page_closes_when_its_container_disappears() {
+        let mut app = test_app();
+        app.containers = vec![make_container("c2", "other", "Up", None)];
+        app.page = Page::Logs;
+        app.logs_container_id = Some("c1".into());
+        app.logs = vec!["stale".into()];
+        leave_page_if_container_gone(&mut app);
+        assert!(app.page == Page::List);
+        assert!(app.logs.is_empty() && app.logs_container_id.is_none());
+
+        // Still present -> stay on the page.
+        app.page = Page::Detail;
+        app.logs_container_id = Some("c2".into());
+        leave_page_if_container_gone(&mut app);
+        assert!(app.page == Page::Detail);
+    }
 
     // --- exec ---
 

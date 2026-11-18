@@ -4,12 +4,20 @@ use bollard::query_parameters::{
 };
 use bollard::Docker;
 use futures_util::StreamExt;
+use std::time::Duration;
+use tokio::time::timeout;
 
 use crate::app::{ComposeInfo, ContainerDetail, ContainerInfo, ContainerStats};
 use crate::docker_host::{self, DockerHost};
 
-/// Read/write timeout (seconds) for each request to the daemon.
+/// Read/write timeout (seconds) for each request to the daemon. Lifecycle actions run in
+/// the background and can legitimately take a while (stop waits for the grace period).
 const CLIENT_TIMEOUT_SECS: u64 = 120;
+
+/// Upper bound for the polling calls made from the UI loop (list, stats, logs, inspect,
+/// ping). They are awaited inline, so a wedged daemon must not freeze the TUI for the
+/// full client timeout.
+const POLL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build a client for the daemon the `docker` CLI would use (DOCKER_HOST, then the
 /// active docker context, then the default socket). Returns the client together with
@@ -37,7 +45,7 @@ pub fn connect() -> Result<(Docker, DockerHost), String> {
 
 /// Check if the Docker daemon is reachable.
 pub async fn ping(docker: &Docker) -> bool {
-    docker.ping().await.is_ok()
+    matches!(timeout(POLL_TIMEOUT, docker.ping()).await, Ok(Ok(_)))
 }
 
 /// List all containers and return simplified info.
@@ -47,8 +55,8 @@ pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
         ..Default::default()
     };
 
-    match docker.list_containers(Some(options)).await {
-        Ok(containers) => containers
+    match timeout(POLL_TIMEOUT, docker.list_containers(Some(options))).await {
+        Ok(Ok(containers)) => containers
             .into_iter()
             .map(|c| {
                 let compose_project = c
@@ -82,7 +90,7 @@ pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
                 }
             })
             .collect(),
-        Err(_) => Vec::new(),
+        Ok(Err(_)) | Err(_) => Vec::new(),
     }
 }
 
@@ -102,17 +110,23 @@ pub async fn fetch_logs(docker: &Docker, container_id: &str, tail: usize) -> Vec
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
 
-    while let Some(Ok(output)) = stream.next().await {
-        match output {
-            // Containers started with a TTY (`docker run -t`, compose `tty: true`) emit a
-            // single raw stream that bollard yields as `Console`.
-            LogOutput::StdOut { message } | LogOutput::Console { message } => {
-                push_log_chunk(&mut stdout_buf, &message, &mut lines)
+    let read_all = async {
+        while let Some(Ok(output)) = stream.next().await {
+            match output {
+                // Containers started with a TTY (`docker run -t`, compose `tty: true`)
+                // emit a single raw stream that bollard yields as `Console`.
+                LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                    push_log_chunk(&mut stdout_buf, &message, &mut lines)
+                }
+                LogOutput::StdErr { message } => {
+                    push_log_chunk(&mut stderr_buf, &message, &mut lines)
+                }
+                LogOutput::StdIn { .. } => {}
             }
-            LogOutput::StdErr { message } => push_log_chunk(&mut stderr_buf, &message, &mut lines),
-            LogOutput::StdIn { .. } => {}
         }
-    }
+    };
+    // On timeout keep whatever arrived; partial logs beat a frozen UI.
+    let _ = timeout(POLL_TIMEOUT, read_all).await;
     flush_log_buffer(&mut stdout_buf, &mut lines);
     flush_log_buffer(&mut stderr_buf, &mut lines);
 
@@ -172,7 +186,10 @@ fn strip_ansi_and_control(input: &str) -> String {
 /// Inspect a container and return static detail info (ports, volumes, env, etc.).
 /// Called once when entering the detail/logs page.
 pub async fn inspect_container(docker: &Docker, container_id: &str) -> Option<ContainerDetail> {
-    let inspect = docker.inspect_container(container_id, None).await.ok()?;
+    let inspect = timeout(POLL_TIMEOUT, docker.inspect_container(container_id, None))
+        .await
+        .ok()?
+        .ok()?;
 
     let config = inspect.config.as_ref();
     let state = inspect.state.as_ref();
@@ -278,7 +295,7 @@ pub async fn fetch_stats(docker: &Docker, container_id: &str) -> Option<Containe
         one_shot: true,
     };
     let mut stream = docker.stats(container_id, Some(stats_opts));
-    let stats = stream.next().await?.ok()?;
+    let stats = timeout(POLL_TIMEOUT, stream.next()).await.ok()??.ok()?;
 
     let mut result = ContainerStats::default();
 

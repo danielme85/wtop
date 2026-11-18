@@ -300,6 +300,25 @@ impl ContainerAction {
         ]
     }
 
+    /// Destructive actions that must be confirmed before they run.
+    pub fn needs_confirmation(self) -> bool {
+        matches!(self, ContainerAction::Kill | ContainerAction::Remove)
+    }
+
+    /// Present-participle label shown while a lifecycle action is running.
+    pub fn progress_label(self) -> &'static str {
+        match self {
+            ContainerAction::Start => "Starting",
+            ContainerAction::Stop => "Stopping",
+            ContainerAction::Restart => "Restarting",
+            ContainerAction::Pause => "Pausing",
+            ContainerAction::Unpause => "Unpausing",
+            ContainerAction::Kill => "Killing",
+            ContainerAction::Remove => "Removing",
+            ContainerAction::Details | ContainerAction::Logs | ContainerAction::Exec => "Opening",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ContainerAction::Start => "Start",
@@ -364,6 +383,15 @@ impl ExecShellMenu {
     pub fn selected_shell(&self) -> &'static ExecShell {
         &EXEC_SHELLS[self.selected]
     }
+}
+
+/// A container lifecycle action, captured when it is chosen so that it still targets the
+/// same container after the list re-sorts or the selection moves.
+#[derive(Clone, Debug)]
+pub struct PendingAction {
+    pub action: ContainerAction,
+    pub container_id: String,
+    pub container_name: String,
 }
 
 /// State for the action menu popup.
@@ -453,6 +481,10 @@ pub struct App {
     pub log_search_query: String,
     /// Whether the quit-confirmation dialog is showing.
     pub quit_confirm: bool,
+    /// Destructive action awaiting a "y" confirmation (None = no dialog).
+    pub confirm_action: Option<PendingAction>,
+    /// Lifecycle actions running in the background, keyed by container ID.
+    pub actions_in_flight: HashMap<String, PendingAction>,
 }
 
 impl App {
@@ -487,6 +519,8 @@ impl App {
             log_search_active: false,
             log_search_query: String::new(),
             quit_confirm: false,
+            confirm_action: None,
+            actions_in_flight: HashMap::new(),
         }
     }
 
