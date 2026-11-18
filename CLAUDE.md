@@ -15,7 +15,7 @@ cargo test               # run tests
 ## Architecture
 
 - **Immediate-mode TUI**: Ratatui renders from a snapshot of state each frame — no persistent widget tree
-- **Direct socket access**: Bollard connects to `/var/run/docker.sock` directly (no shell overhead)
+- **Direct socket access**: Bollard talks to the Docker API directly (no shell overhead). The endpoint is resolved like the `docker` CLI does (`DOCKER_HOST` → docker context → `/var/run/docker.sock`) in `docker_host.rs`, and Exec Shell passes the same endpoint to `docker exec`
 - **Fully async**: Tokio runtime drives both Docker API calls and the input event loop
 - **Configurable tick rate**: Default 250ms refresh; input polled with 50ms timeout
 - **Per-container stats history**: Optional background polling stores stats for all running containers in a HashMap, preserving graph history across container switches
@@ -27,6 +27,7 @@ src/
   main.rs              — tokio entrypoint, terminal setup/teardown, event loop
   app.rs               — App state (container list, stats history, per-container data)
   docker_client.rs     — Bollard client: connect, list, inspect, stats, logs, lifecycle
+  docker_host.rs       — Resolve the daemon endpoint (DOCKER_HOST / docker context / default)
   ui.rs                — Ratatui rendering: list, detail, resources, logs, settings
   settings.rs          — Persisted settings: aggregation, theme, refresh rate, column visibility
   theme.rs             — Color themes (Norse, Light, Dark, Mono)
@@ -49,6 +50,8 @@ brew install danielme85/tap/wtop
 ```
 
 The formula and tap repo live at [danielme85/homebrew-tap](https://github.com/danielme85/homebrew-tap). The `update-homebrew` job in `.github/workflows/release.yml` handles automatic updates — it requires the `HOMEBREW_TAP_TOKEN` repository secret.
+
+Every release must publish `SHA256SUMS` (the `release` job generates it): `wtop --update` and `remote-install.sh` refuse to install a binary they cannot verify against it.
 
 ## Cross-compilation
 

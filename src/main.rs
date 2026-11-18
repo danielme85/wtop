@@ -568,7 +568,6 @@ fn sort_containers(containers: &mut [ContainerInfo], sort_by: SortBy, all_stats:
     }
 }
 
-/// Check GitHub releases and update (or reinstall) the binary via remote-install.sh.
 /// Detect how wtop was installed based on the binary's path.
 enum InstallMethod {
     Homebrew,
@@ -590,36 +589,115 @@ fn detect_install_method() -> InstallMethod {
     }
 }
 
+const REPO: &str = "danielme85/wtop";
+
+/// Name of the release asset built for this platform (matches release.yml).
+fn platform_asset_name() -> Result<String, String> {
+    let os = match std::env::consts::OS {
+        "linux" => "linux",
+        "macos" => "darwin",
+        other => return Err(format!("no prebuilt binary for OS '{}'", other)),
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => return Err(format!("no prebuilt binary for architecture '{}'", other)),
+    };
+    Ok(format!("wtop-{}-{}", os, arch))
+}
+
+/// The parts of GitHub's "latest release" response that the updater needs.
+#[derive(Debug, PartialEq)]
+struct ReleaseInfo {
+    tag: String,
+    /// (asset name, download URL)
+    assets: Vec<(String, String)>,
+}
+
+fn parse_release(json: &str) -> Result<ReleaseInfo, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("invalid GitHub API response: {}", e))?;
+    let tag = v["tag_name"]
+        .as_str()
+        .ok_or("GitHub API response has no tag_name")?
+        .to_string();
+    let assets = v["assets"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|asset| {
+                    Some((
+                        asset["name"].as_str()?.to_string(),
+                        asset["browser_download_url"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ReleaseInfo { tag, assets })
+}
+
+impl ReleaseInfo {
+    /// Download URL of `name`, only if it points at this repo's release downloads.
+    fn asset_url(&self, name: &str) -> Option<&str> {
+        let prefix = format!("https://github.com/{}/releases/download/", REPO);
+        self.assets
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, url)| url.as_str())
+            .filter(|url| url.starts_with(&prefix))
+    }
+}
+
+/// Find the expected SHA-256 (lowercase hex) for `asset` in a `sha256sum`-style file.
+fn expected_sha256(sums: &str, asset: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        // sha256sum marks binary-mode entries with a leading '*'.
+        let name = parts.next()?.trim_start_matches('*');
+        (name == asset && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| hash.to_ascii_lowercase())
+    })
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data).iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Fetch a URL with curl (HTTPS only, fail on HTTP errors, follow redirects).
+fn curl_get(url: &str, extra_args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = Command::new("curl")
+        .args(["-fsSL", "--proto", "=https", "--tlsv1.2"])
+        .args(extra_args)
+        .arg(url)
+        .output()
+        .map_err(|e| format!("curl not found: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "download failed for {} (curl exit {:?})",
+            url,
+            output.status.code()
+        ));
+    }
+    Ok(output.stdout)
+}
+
+/// Check GitHub for a newer release and install it in place.
+///
+/// The binary is downloaded from the tagged GitHub release and verified against the
+/// release's SHA256SUMS before it replaces the running executable. (Previously this
+/// piped an install script from the `main` branch straight into `sh`, unverified.)
 fn run_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("wtop {} — checking for updates...", VERSION);
 
-    let install_method = detect_install_method();
-
-    let output = Command::new("curl")
-        .args([
-            "-fsSL",
-            "-H",
-            "Accept: application/vnd.github.v3+json",
-            "https://api.github.com/repos/danielme85/wtop/releases/latest",
-        ])
-        .output()
-        .map_err(|e| format!("curl not found: {}", e))?;
-
-    if !output.status.success() {
-        eprintln!("Failed to reach GitHub API (curl exited {:?})", output.status.code());
-        return Ok(());
-    }
-
-    let body = String::from_utf8_lossy(&output.stdout);
-    let latest_tag = match extract_json_string(&body, "tag_name") {
-        Some(t) => t,
-        None => {
-            eprintln!("Could not parse latest release version from GitHub API response.");
-            return Ok(());
-        }
-    };
-    let latest_version = latest_tag.trim_start_matches('v');
-
+    let body = curl_get(
+        &format!("https://api.github.com/repos/{}/releases/latest", REPO),
+        &["-H", "Accept: application/vnd.github+json"],
+    )?;
+    let release = parse_release(&String::from_utf8_lossy(&body))?;
+    let latest_version = release.tag.trim_start_matches('v');
     println!("Latest release: {}", latest_version);
 
     if !force && !is_newer(latest_version, VERSION) {
@@ -630,7 +708,7 @@ fn run_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    match install_method {
+    match detect_install_method() {
         InstallMethod::Homebrew => {
             println!("\nThis binary was installed via Homebrew.");
             println!("To update, run:\n");
@@ -646,43 +724,81 @@ fn run_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         InstallMethod::Binary => {}
     }
 
+    let asset = platform_asset_name()?;
+    let releases_page = format!("https://github.com/{}/releases", REPO);
+    let bin_url = release.asset_url(&asset).ok_or_else(|| {
+        format!("release {} has no asset '{}'. See {}", release.tag, asset, releases_page)
+    })?;
+    let sums_url = release.asset_url("SHA256SUMS").ok_or_else(|| {
+        format!(
+            "release {} does not publish SHA256SUMS, so the download cannot be verified. \
+             Refusing to install it; download manually from {}",
+            release.tag, releases_page
+        )
+    })?;
+
     if force {
         println!("Reinstalling wtop {}...", latest_version);
     } else {
         println!("Updating {} → {}...", VERSION, latest_version);
     }
 
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg("curl -fsSL https://raw.githubusercontent.com/danielme85/wtop/main/remote-install.sh | sh")
-        .status()
-        .map_err(|e| format!("Failed to run install script: {}", e))?;
-
-    if status.success() {
-        if force {
-            println!("\nSuccessfully reinstalled wtop {}.", latest_version);
-        } else {
-            println!("\nSuccessfully updated wtop {} → {}.", VERSION, latest_version);
-        }
-        println!("Run 'wtop --version' to confirm.");
-    } else {
-        eprintln!("Install script failed (exit {:?}).", status.code());
+    let sums = String::from_utf8_lossy(&curl_get(sums_url, &[])?).into_owned();
+    let expected = expected_sha256(&sums, &asset)
+        .ok_or_else(|| format!("SHA256SUMS has no entry for {}", asset))?;
+    let binary = curl_get(bin_url, &[])?;
+    let actual = sha256_hex(&binary);
+    if actual != expected {
+        return Err(format!(
+            "checksum mismatch for {}: expected {}, got {}. Not installing.",
+            asset, expected, actual
+        )
+        .into());
     }
+    println!("Verified SHA-256 {}", actual);
 
+    install_binary(&binary, latest_version)?;
+    println!("\nSuccessfully installed wtop {}.", latest_version);
     Ok(())
 }
 
-/// Extract the string value for a JSON key (no external parser needed).
-fn extract_json_string(json: &str, key: &str) -> Option<String> {
-    let marker = format!("\"{}\":", key);
-    let pos = json.find(&marker)?;
-    let after = json[pos + marker.len()..].trim_start();
-    if let Some(inner) = after.strip_prefix('"') {
-        let end = inner.find('"')?;
-        Some(inner[..end].to_string())
-    } else {
-        None
+/// Atomically replace the running executable with `binary` after a smoke test.
+fn install_binary(binary: &[u8], expected_version: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| format!("cannot locate the running wtop binary: {}", e))?;
+    let dir = exe.parent().ok_or("running binary has no parent directory")?;
+    // Same directory as the target so the final rename is atomic (same filesystem).
+    let tmp = dir.join(format!(".wtop-update-{}", std::process::id()));
+    let cleanup = |e: String| {
+        let _ = std::fs::remove_file(&tmp);
+        e
+    };
+
+    std::fs::write(&tmp, binary).map_err(|e| {
+        format!("cannot write to {} ({}); check its permissions", dir.display(), e)
+    })?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| cleanup(format!("cannot make new binary executable: {}", e)))?;
+
+    // Smoke test: the new binary must run on this machine and report the expected version.
+    let out = Command::new(&tmp)
+        .arg("--version")
+        .output()
+        .map_err(|e| cleanup(format!("new binary does not run on this system: {}", e)))?;
+    let reported = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || !reported.contains(expected_version) {
+        return Err(cleanup(format!(
+            "new binary failed its self-check (reported {:?}); not installing",
+            reported.trim()
+        )));
     }
+
+    std::fs::rename(&tmp, &exe)
+        .map_err(|e| cleanup(format!("cannot replace {}: {}", exe.display(), e)))?;
+    Ok(())
 }
 
 /// Returns true if `latest` is strictly greater than `current` (semver numeric comparison).
@@ -1312,32 +1428,69 @@ mod tests {
         assert!(!is_newer("1.0.1", "1.0.2"));
     }
 
-    // --- extract_json_string ---
+    // --- self-update ---
+
+    const RELEASE_JSON: &str = r#"{
+        "tag_name": "v1.4.0",
+        "name": "Release 1.4.0",
+        "assets": [
+            {"name": "wtop-linux-amd64",
+             "browser_download_url": "https://github.com/danielme85/wtop/releases/download/v1.4.0/wtop-linux-amd64"},
+            {"name": "SHA256SUMS",
+             "browser_download_url": "https://github.com/danielme85/wtop/releases/download/v1.4.0/SHA256SUMS"},
+            {"name": "wtop-darwin-arm64",
+             "browser_download_url": "https://evil.example.com/wtop-darwin-arm64"}
+        ]
+    }"#;
 
     #[test]
-    fn extract_json_string_basic() {
-        let json = r#"{"tag_name": "v1.0.3", "name": "Release 1.0.3"}"#;
-        assert_eq!(extract_json_string(json, "tag_name"), Some("v1.0.3".to_string()));
+    fn parse_release_reads_tag_and_assets() {
+        let r = parse_release(RELEASE_JSON).unwrap();
+        assert_eq!(r.tag, "v1.4.0");
+        assert_eq!(r.assets.len(), 3);
+        assert!(r.asset_url("wtop-linux-amd64").unwrap().ends_with("/v1.4.0/wtop-linux-amd64"));
+        assert!(r.asset_url("SHA256SUMS").is_some());
     }
 
     #[test]
-    fn extract_json_string_with_whitespace_after_colon() {
-        // GitHub API sometimes emits extra whitespace after the colon
-        let json = r#"{"tag_name":  "v2.0.0"}"#;
-        assert_eq!(extract_json_string(json, "tag_name"), Some("v2.0.0".to_string()));
+    fn asset_url_rejects_urls_outside_this_repo() {
+        let r = parse_release(RELEASE_JSON).unwrap();
+        assert_eq!(r.asset_url("wtop-darwin-arm64"), None);
+        assert_eq!(r.asset_url("missing"), None);
     }
 
     #[test]
-    fn extract_json_string_missing_key_returns_none() {
-        let json = r#"{"other_key": "value"}"#;
-        assert_eq!(extract_json_string(json, "tag_name"), None);
+    fn parse_release_without_tag_is_an_error() {
+        assert!(parse_release(r#"{"message": "API rate limit exceeded"}"#).is_err());
+        assert!(parse_release("not json").is_err());
     }
 
     #[test]
-    fn extract_json_string_picks_correct_key() {
-        let json = r#"{"name": "the release", "tag_name": "v1.2.3", "body": "notes"}"#;
-        assert_eq!(extract_json_string(json, "tag_name"), Some("v1.2.3".to_string()));
-        assert_eq!(extract_json_string(json, "name"), Some("the release".to_string()));
+    fn expected_sha256_finds_matching_entry() {
+        let a = "a".repeat(64);
+        let b = "B".repeat(64);
+        let sums = format!("{a}  wtop-linux-amd64\n{b} *wtop-darwin-arm64\n");
+        assert_eq!(expected_sha256(&sums, "wtop-linux-amd64"), Some(a));
+        assert_eq!(expected_sha256(&sums, "wtop-darwin-arm64"), Some("b".repeat(64)));
+        assert_eq!(expected_sha256(&sums, "wtop-linux-arm64"), None);
+        // A prefix of another asset name must not match.
+        assert_eq!(expected_sha256(&sums, "wtop-linux"), None);
+        assert_eq!(expected_sha256("xyz  wtop-linux-amd64", "wtop-linux-amd64"), None);
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn platform_asset_name_matches_release_naming() {
+        let name = platform_asset_name().unwrap();
+        assert!(name.starts_with("wtop-linux-") || name.starts_with("wtop-darwin-"));
+        assert!(name.ends_with("-amd64") || name.ends_with("-arm64"));
     }
 
     // --- sort_containers ---
