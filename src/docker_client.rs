@@ -6,10 +6,33 @@ use bollard::Docker;
 use futures_util::StreamExt;
 
 use crate::app::{ComposeInfo, ContainerDetail, ContainerInfo, ContainerStats};
+use crate::docker_host::{self, DockerHost};
 
-/// Connect to the local Docker daemon via the default socket.
-pub fn connect() -> Result<Docker, bollard::errors::Error> {
-    Docker::connect_with_local_defaults()
+/// Read/write timeout (seconds) for each request to the daemon.
+const CLIENT_TIMEOUT_SECS: u64 = 120;
+
+/// Build a client for the daemon the `docker` CLI would use (DOCKER_HOST, then the
+/// active docker context, then the default socket). Returns the client together with
+/// the endpoint, which callers must reuse for anything that shells out to the CLI.
+///
+/// Note: this does not contact the daemon; use [`ping`] to check reachability.
+pub fn connect() -> Result<(Docker, DockerHost), String> {
+    let endpoint = docker_host::resolve()?;
+    let host = endpoint.host.as_str();
+    let docker = if host.starts_with("unix://") || host.starts_with("npipe://") {
+        Docker::connect_with_local(host, CLIENT_TIMEOUT_SECS, bollard::API_DEFAULT_VERSION)
+    } else if host.starts_with("tcp://") || host.starts_with("http://") {
+        if endpoint.tls {
+            return Err(format!("TLS Docker endpoints are not supported yet ({})", host));
+        }
+        Docker::connect_with_http(host, CLIENT_TIMEOUT_SECS, bollard::API_DEFAULT_VERSION)
+    } else {
+        return Err(format!("Unsupported Docker endpoint: {}", host));
+    };
+    match docker {
+        Ok(d) => Ok((d, endpoint)),
+        Err(e) => Err(format!("Cannot connect to {}: {}", endpoint.host, e)),
+    }
 }
 
 /// Check if the Docker daemon is reachable.

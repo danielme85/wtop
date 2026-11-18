@@ -1,6 +1,7 @@
 mod aggregation;
 mod app;
 mod docker_client;
+mod docker_host;
 mod icons;
 mod settings;
 mod theme;
@@ -58,7 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Connect to Docker (fail gracefully if unavailable)
-    let mut docker = docker_client::connect().ok();
+    let (mut docker, docker_host, connect_error) = match docker_client::connect() {
+        Ok((d, endpoint)) => (Some(d), Some(endpoint.host), None),
+        Err(e) => (None, None, Some(e)),
+    };
 
     // Terminal setup. `try_init` enables raw mode + the alternate screen and installs a
     // panic hook that restores the terminal first, so a panic never leaves the user's
@@ -68,7 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (settings, settings_warning) = settings::Settings::load_with_warning();
     let themes = theme::load_all();
     let mut app = app::App::new(settings, themes);
-    if let Some(msg) = settings_warning {
+    app.docker_host = docker_host;
+    if let Some(msg) = settings_warning.or(connect_error) {
         app.info_popup = Some(msg);
     }
 
@@ -181,6 +186,89 @@ async fn handle_action(
         Ok(()) => app.set_status(format!("{}: {}", action.label(), name)),
         Err(e) => app.set_status(format!("Error: {}", e)),
     }
+}
+
+/// Exit codes `docker exec` uses when the command could not be started at all
+/// (125: docker/daemon error, 126: not executable, 127: not found).
+fn exec_failed_to_start(code: Option<i32>) -> bool {
+    matches!(code, Some(125..=127))
+}
+
+/// Build the `docker exec` command for `shell` in `container_id`.
+///
+/// `DOCKER_HOST` is set to the endpoint wtop itself is connected to, so the CLI cannot
+/// pick a different daemon through its own context and fail with "No such container".
+/// (DOCKER_HOST takes precedence over DOCKER_CONTEXT in the CLI; we also drop the latter.)
+fn exec_command(docker_host: Option<&str>, container_id: &str, shell: &app::ExecShell) -> Command {
+    let mut cmd = Command::new("docker");
+    if let Some(host) = docker_host {
+        cmd.env("DOCKER_HOST", host).env_remove("DOCKER_CONTEXT");
+    }
+    cmd.args(["exec", "-it", "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor"])
+        .arg(container_id)
+        .args(shell.argv);
+    cmd
+}
+
+/// Suspend the TUI, run an interactive shell in the container, then restore the TUI.
+///
+/// If the shell could not be started (missing binary, CLI missing, wrong daemon), the
+/// error printed by `docker` stays on screen until the user presses Enter; previously
+/// it was wiped instantly when the alternate screen came back.
+fn run_exec(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut app::App,
+    container_id: &str,
+    shell: &app::ExecShell,
+) -> io::Result<()> {
+    terminal::disable_raw_mode()?;
+    io::stdout().execute(LeaveAlternateScreen)?;
+    io::stdout().execute(terminal::Clear(terminal::ClearType::All))?;
+    terminal.show_cursor()?;
+
+    let started = std::time::Instant::now();
+    let status = exec_command(app.docker_host.as_deref(), container_id, shell).status();
+
+    let failure = match &status {
+        Ok(s) if s.success() => None,
+        // A non-zero exit right away almost always means the session never started
+        // (e.g. "No such container"); a long session ending non-zero is just the
+        // shell's last exit status and needs no pause.
+        Ok(s) if exec_failed_to_start(s.code()) || started.elapsed() < Duration::from_secs(2) => {
+            Some(format!(
+                "Could not start '{}' in the container (exit code {}). \
+                 The image may not include it; try another shell.",
+                shell.name,
+                s.code().unwrap_or(-1)
+            ))
+        }
+        Ok(_) => None,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(
+            "Exec Shell needs the `docker` CLI, but it was not found in PATH.".to_string(),
+        ),
+        Err(e) => Some(format!("Failed to run `docker exec`: {}", e)),
+    };
+
+    if let Some(msg) = &failure {
+        use std::io::Write;
+        println!("\n[wtop] {}", msg);
+        print!("[wtop] Press Enter to return to wtop...");
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        let _ = io::stdin().read_line(&mut line);
+    }
+
+    app.set_status(match (&status, &failure) {
+        (_, Some(_)) => format!("Exec ({}): failed to start", shell.name),
+        (Ok(s), None) if s.success() => format!("Exec ({}): session ended", shell.name),
+        (Ok(s), None) => format!("Exec ({}): exited with {}", shell.name, s.code().unwrap_or(-1)),
+        (Err(_), None) => unreachable!("spawn errors always set a failure message"),
+    });
+
+    terminal::enable_raw_mode()?;
+    io::stdout().execute(EnterAlternateScreen)?;
+    app.needs_clear = true;
+    Ok(())
 }
 
 /// Check if any mini bar is enabled without poll_all_containers and show a hint.
@@ -578,45 +666,7 @@ async fn run_loop(
                         }
                         KeyCode::Enter => {
                             if let Some(m) = app.exec_shell_menu.take() {
-                                let shell = m.selected_shell().to_string();
-                                app.pending_exec = Some((m.container_id, shell));
-                            }
-                            // Spawn the shell immediately
-                            if let Some((container_id, shell)) = app.pending_exec.take() {
-                                terminal::disable_raw_mode()?;
-                                io::stdout().execute(LeaveAlternateScreen)?;
-                                io::stdout().execute(terminal::Clear(terminal::ClearType::All))?;
-                                terminal.show_cursor()?;
-
-                                let status = Command::new("docker")
-                                    .args([
-                                        "exec", "-it",
-                                        "-e", "TERM=xterm-256color",
-                                        "-e", "COLORTERM=truecolor",
-                                        &container_id,
-                                        &shell,
-                                    ])
-                                    .status();
-
-                                match status {
-                                    Ok(s) if s.success() => {
-                                        app.set_status(format!("Exec ({}): session ended", shell));
-                                    }
-                                    Ok(s) => {
-                                        app.set_status(format!(
-                                            "Exec ({}): exited with {}",
-                                            shell,
-                                            s.code().unwrap_or(-1)
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        app.set_status(format!("Exec error: {}", e));
-                                    }
-                                }
-
-                                terminal::enable_raw_mode()?;
-                                io::stdout().execute(EnterAlternateScreen)?;
-                                app.needs_clear = true;
+                                run_exec(terminal, app, &m.container_id, m.selected_shell())?;
                             }
                         }
                         _ => {}
@@ -893,8 +943,9 @@ async fn run_loop(
         if last_tick.elapsed() >= tick_rate {
             // Attempt reconnection if Docker is disconnected
             if docker.is_none() && consecutive_failures < 3 {
-                if let Ok(d) = docker_client::connect() {
+                if let Ok((d, endpoint)) = docker_client::connect() {
                     *docker = Some(d);
+                    app.docker_host = Some(endpoint.host);
                     app.set_status("Docker reconnected".to_string());
                     consecutive_failures = 0;
                 } else {
@@ -1006,6 +1057,52 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use app::{ContainerInfo, ContainerStats};
+
+    // --- exec ---
+
+    fn exec_args(cmd: &Command) -> Vec<String> {
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn exec_uses_bare_shell_names_resolved_by_container_path() {
+        let bash = app::EXEC_SHELLS.iter().find(|s| s.name == "bash").unwrap();
+        let cmd = exec_command(None, "abc123", bash);
+        assert_eq!(exec_args(&cmd).last().unwrap(), "bash");
+        assert!(app::EXEC_SHELLS.iter().all(|s| !s.argv[0].starts_with('/')));
+    }
+
+    #[test]
+    fn exec_auto_is_default_and_falls_back_to_sh() {
+        let auto = &app::EXEC_SHELLS[0];
+        assert_eq!(auto.name, "auto");
+        assert_eq!(auto.argv[0], "sh");
+        assert!(auto.argv[2].contains("exec bash") && auto.argv[2].ends_with("exec sh"));
+    }
+
+    #[test]
+    fn exec_targets_same_daemon_as_wtop() {
+        let shell = &app::EXEC_SHELLS[0];
+        let cmd = exec_command(Some("unix:///run/user/1000/docker.sock"), "abc123", shell);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new("DOCKER_HOST"),
+            Some(std::ffi::OsStr::new("unix:///run/user/1000/docker.sock"))
+        )));
+        assert!(envs.contains(&(std::ffi::OsStr::new("DOCKER_CONTEXT"), None)));
+        let args = exec_args(&cmd);
+        assert_eq!(&args[..2], ["exec", "-it"]);
+        assert!(args.contains(&"abc123".to_string()));
+    }
+
+    #[test]
+    fn exec_start_failure_codes() {
+        assert!(exec_failed_to_start(Some(126)));
+        assert!(exec_failed_to_start(Some(127)));
+        assert!(!exec_failed_to_start(Some(1)));
+        assert!(!exec_failed_to_start(Some(0)));
+        assert!(!exec_failed_to_start(None));
+    }
 
     // --- is_newer ---
 

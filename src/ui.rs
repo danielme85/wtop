@@ -1481,8 +1481,8 @@ fn draw_exec_shell_menu(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let shell_count = EXEC_SHELLS.len() as u16;
     let popup_width: u16 = 32;
-    // items + title border + hint line + bottom border
-    let popup_height = shell_count + 4;
+    // items + top border + bottom border (the key hint lives in the bottom border)
+    let popup_height = shell_count + 2;
 
     let popup_area = centered_popup(frame.area(), popup_width, popup_height);
 
@@ -1508,9 +1508,9 @@ fn draw_exec_shell_menu(frame: &mut Frame, app: &App, theme: &Theme) {
     let lines: Vec<Line> = EXEC_SHELLS
         .iter()
         .enumerate()
-        .map(|(i, (path, short))| {
+        .map(|(i, shell)| {
             let is_selected = i == menu.selected;
-            let label = format!("  {:<10}  {}", short, path);
+            let label = format!("  {:<10}{}", shell.name, shell.hint);
             if is_selected {
                 Line::from(Span::styled(
                     label,

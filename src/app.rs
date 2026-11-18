@@ -316,13 +316,30 @@ impl ContainerAction {
     }
 }
 
-/// Common shells to offer in the exec shell selection menu.
-pub const EXEC_SHELLS: &[(&str, &str)] = &[
-    ("/bin/bash",        "bash"),
-    ("/bin/sh",          "sh"),
-    ("/bin/zsh",         "zsh"),
-    ("/bin/fish",        "fish"),
-    ("/usr/bin/python3", "python3"),
+/// A shell choice in the Exec Shell menu.
+pub struct ExecShell {
+    /// Short name shown in the menu and in status messages.
+    pub name: &'static str,
+    /// One-line hint shown next to the name.
+    pub hint: &'static str,
+    /// Command passed to `docker exec`. Bare names are resolved through the container's
+    /// own PATH, so they work whether the image keeps them in /bin or /usr/bin.
+    pub argv: &'static [&'static str],
+}
+
+/// Shells offered in the exec shell selection menu. "auto" is first (the default) and
+/// picks bash when the image has it, else falls back to POSIX sh (Alpine/BusyBox).
+pub const EXEC_SHELLS: &[ExecShell] = &[
+    ExecShell {
+        name: "auto",
+        hint: "bash, else sh",
+        argv: &["sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash; exec sh"],
+    },
+    ExecShell { name: "bash", hint: "", argv: &["bash"] },
+    ExecShell { name: "sh", hint: "", argv: &["sh"] },
+    ExecShell { name: "zsh", hint: "", argv: &["zsh"] },
+    ExecShell { name: "fish", hint: "", argv: &["fish"] },
+    ExecShell { name: "python3", hint: "", argv: &["python3"] },
 ];
 
 /// State for the exec shell selection submenu.
@@ -344,8 +361,8 @@ impl ExecShellMenu {
         self.selected = self.selected.saturating_sub(1);
     }
 
-    pub fn selected_shell(&self) -> &str {
-        EXEC_SHELLS[self.selected].0
+    pub fn selected_shell(&self) -> &'static ExecShell {
+        &EXEC_SHELLS[self.selected]
     }
 }
 
@@ -428,8 +445,8 @@ pub struct App {
     pub info_popup: Option<String>,
     /// Shell selection submenu shown after choosing Exec from the action menu.
     pub exec_shell_menu: Option<ExecShellMenu>,
-    /// Container ID and shell path to exec into (set by shell menu, consumed by run_loop).
-    pub pending_exec: Option<(String, String)>,
+    /// Docker endpoint wtop is connected to; `docker exec` is pointed at the same one.
+    pub docker_host: Option<String>,
     /// Log search: whether the search input is active.
     pub log_search_active: bool,
     /// Log search query string.
@@ -466,7 +483,7 @@ impl App {
             needs_clear: false,
             info_popup: None,
             exec_shell_menu: None,
-            pending_exec: None,
+            docker_host: None,
             log_search_active: false,
             log_search_query: String::new(),
             quit_confirm: false,
