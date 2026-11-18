@@ -10,7 +10,7 @@ use std::io;
 use std::process::Command;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     self, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
     LeaveAlternateScreen,
@@ -647,7 +647,7 @@ async fn run_loop(
                         }
                         _ => {}
                     }
-                } else if key.code == KeyCode::Char('q') {
+                } else if key.code == KeyCode::Char('q') && !app.is_typing() {
                     try_quit(app);
                 } else if key.code == KeyCode::Esc && app.page != Page::Settings {
                     // Esc: go back one level, or quit from the list
@@ -665,7 +665,10 @@ async fn run_loop(
                         }
                         Page::Settings => unreachable!(),
                     }
-                } else if key.code == KeyCode::Char('s') && app.page != Page::Settings {
+                } else if key.code == KeyCode::Char('s')
+                    && app.page != Page::Settings
+                    && !app.is_typing()
+                {
                     // Global 's' opens settings from any page
                     app.previous_page = Some(app.page);
                     app.set_page(Page::Settings);
@@ -806,7 +809,11 @@ async fn run_loop(
                                     KeyCode::Backspace => {
                                         app.log_search_query.pop();
                                     }
-                                    KeyCode::Char(c) => {
+                                    KeyCode::Char(c)
+                                        if !key.modifiers.intersects(
+                                            KeyModifiers::CONTROL | KeyModifiers::ALT,
+                                        ) =>
+                                    {
                                         app.log_search_query.push(c);
                                     }
                                     _ => {}

@@ -74,20 +74,46 @@ pub async fn fetch_logs(docker: &Docker, container_id: &str, tail: usize) -> Vec
 
     let mut stream = docker.logs(container_id, Some(options));
     let mut lines = Vec::new();
+    // Docker frames are not guaranteed to end on a line (or even UTF-8 char) boundary,
+    // so buffer partial lines per stream until their newline arrives.
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
 
     while let Some(Ok(output)) = stream.next().await {
-        let text = match output {
-            LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
-                String::from_utf8_lossy(&message).to_string()
+        match output {
+            // Containers started with a TTY (`docker run -t`, compose `tty: true`) emit a
+            // single raw stream that bollard yields as `Console`.
+            LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                push_log_chunk(&mut stdout_buf, &message, &mut lines)
             }
-            _ => continue,
-        };
-        for line in text.lines() {
-            lines.push(strip_ansi_and_control(line));
+            LogOutput::StdErr { message } => push_log_chunk(&mut stderr_buf, &message, &mut lines),
+            LogOutput::StdIn { .. } => {}
         }
     }
+    flush_log_buffer(&mut stdout_buf, &mut lines);
+    flush_log_buffer(&mut stderr_buf, &mut lines);
 
     lines
+}
+
+/// Append `chunk` to the partial-line buffer `buf`, moving every completed line to `out`.
+fn push_log_chunk(buf: &mut Vec<u8>, chunk: &[u8], out: &mut Vec<String>) {
+    buf.extend_from_slice(chunk);
+    let mut start = 0;
+    while let Some(pos) = buf[start..].iter().position(|&b| b == b'\n') {
+        let end = start + pos;
+        out.push(strip_ansi_and_control(&String::from_utf8_lossy(&buf[start..end])));
+        start = end + 1;
+    }
+    buf.drain(..start);
+}
+
+/// Emit whatever is left in a partial-line buffer (a final line without a newline).
+fn flush_log_buffer(buf: &mut Vec<u8>, out: &mut Vec<String>) {
+    if !buf.is_empty() {
+        out.push(strip_ansi_and_control(&String::from_utf8_lossy(buf)));
+        buf.clear();
+    }
 }
 
 /// Strip ANSI escape sequences and control characters from a log line.
@@ -407,5 +433,46 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assemble(chunks: &[&[u8]]) -> Vec<String> {
+        let mut buf = Vec::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            push_log_chunk(&mut buf, c, &mut out);
+        }
+        flush_log_buffer(&mut buf, &mut out);
+        out
+    }
+
+    #[test]
+    fn log_lines_split_on_newlines() {
+        assert_eq!(assemble(&[b"one\ntwo\n"]), ["one", "two"]);
+    }
+
+    #[test]
+    fn log_line_spanning_chunks_is_rejoined() {
+        assert_eq!(assemble(&[b"hel", b"lo\nwor", b"ld\n"]), ["hello", "world"]);
+    }
+
+    #[test]
+    fn log_utf8_char_split_across_chunks_survives() {
+        // "é" is 0xC3 0xA9; splitting it used to produce two replacement chars.
+        assert_eq!(assemble(&[b"caf\xC3", b"\xA9\n"]), ["café"]);
+    }
+
+    #[test]
+    fn log_trailing_line_without_newline_is_kept() {
+        assert_eq!(assemble(&[b"a\nb"]), ["a", "b"]);
+    }
+
+    #[test]
+    fn log_crlf_and_escapes_are_stripped() {
+        assert_eq!(assemble(&[b"\x1b[31mred\x1b[0m\r\n"]), ["red"]);
     }
 }

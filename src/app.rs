@@ -528,6 +528,12 @@ impl App {
         self.selected = self.selected.saturating_sub(1);
     }
 
+    /// True while a text input has focus, so single-letter global shortcuts
+    /// (`q` quit, `s` settings) must be typed into the input instead.
+    pub fn is_typing(&self) -> bool {
+        self.page == Page::Logs && self.log_search_active
+    }
+
     pub fn selected_container_id(&self) -> Option<&str> {
         self.containers.get(self.selected).map(|c| c.id.as_str())
     }
@@ -552,5 +558,26 @@ impl App {
         } else {
             &self.history
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        App::new(Settings::default(), vec![crate::theme::builtin_default()])
+    }
+
+    #[test]
+    fn typing_only_while_log_search_is_active() {
+        let mut app = test_app();
+        assert!(!app.is_typing());
+        app.page = Page::Logs;
+        assert!(!app.is_typing());
+        app.log_search_active = true;
+        assert!(app.is_typing(), "q/s must be typed into the search box");
+        app.page = Page::List;
+        assert!(!app.is_typing());
     }
 }
