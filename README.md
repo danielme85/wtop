@@ -30,7 +30,7 @@
 - **Customizable columns** — toggle ID, Name, Image, Status, CPU, MEM, Disk, Network with optional inline mini bar graphs
 - **Container actions** — start, stop, restart, pause, unpause, kill, remove directly from the TUI
 - **Log viewer** — auto-scrolling with configurable buffer size (100–1000 lines)
-- **Direct socket access** — connects to `/var/run/docker.sock` via [Bollard](https://github.com/fussybeaver/bollard) (no shelling out)
+- **Direct socket access** — talks to the Docker API via [Bollard](https://github.com/fussybeaver/bollard) (no shelling out), using the same daemon as the `docker` CLI: `DOCKER_HOST`, then the active `docker context`, then `/var/run/docker.sock`
 - **Fully async** — [Tokio](https://tokio.rs) runtime drives Docker API calls and input handling concurrently
 - **4 color themes** — Norse (default), Light, Dark, Monochrome
 - **Persistent settings** — all preferences saved to `~/.config/wtop/settings.toml`
@@ -58,7 +58,7 @@ cargo build --release
 
 ### Pre-built binary (Linux amd64 / arm64)
 
-The quickest way to install. The [install script](https://github.com/danielme85/wtop/blob/main/remote-install.sh) auto-detects your architecture (amd64 or arm64), downloads the latest release binary from GitHub, and places it in `~/.local/bin` (or `~/bin`). No authentication required.
+The quickest way to install. The [install script](https://github.com/danielme85/wtop/blob/main/remote-install.sh) auto-detects your architecture (amd64 or arm64), downloads the latest release binary from GitHub, verifies it against the release's `SHA256SUMS`, and places it in `~/.local/bin` (or `~/bin`). No authentication required.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/danielme85/wtop/main/remote-install.sh | sh
@@ -99,7 +99,7 @@ wtop          # launch the TUI
 | Flag | Description |
 |------|-------------|
 | `--version`, `-V` | Print version, build date, branch, and commit hash |
-| `--update` | Check GitHub for a newer release and self-update |
+| `--update` | Check GitHub for a newer release and self-update (SHA-256 verified) |
 | `--reinstall` | Force reinstall of the latest release (even if already up to date) |
 
 ---

@@ -1,4 +1,4 @@
-use ratatui::layout::{Alignment, Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
@@ -51,10 +51,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_info_popup(frame, app, &theme);
     }
 
+    // Destructive-action confirmation
+    if let Some(ref pending) = app.confirm_action {
+        draw_action_confirm(frame, pending, &theme);
+    }
+
     // Quit-confirm dialog (rendered on very top)
     if app.quit_confirm {
         draw_quit_confirm(frame, &theme);
     }
+}
+
+/// Center a `width` x `height` popup inside `area`, shrinking it to fit.
+///
+/// Rendering into a rect that extends past the frame buffer panics in ratatui, so every
+/// popup must go through this rather than building its `Rect` by hand.
+fn centered_popup(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    Rect::new(x, y, width, height)
 }
 
 fn content_block<'a>(title: &str, theme: &Theme) -> Block<'a> {
@@ -152,6 +169,23 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::layou
             frame.render_widget(footer, area);
             return;
         }
+    }
+
+    if let Some(pending) = app.actions_in_flight.values().next() {
+        let more = app.actions_in_flight.len() - 1;
+        let suffix = if more > 0 { format!(" (+{} more)", more) } else { String::new() };
+        let footer = Paragraph::new(Line::from(Span::styled(
+            format!(
+                " {} {}...{} ",
+                pending.action.progress_label(),
+                pending.container_name,
+                suffix
+            ),
+            Style::default().fg(theme.title),
+        )))
+        .style(Style::default().bg(theme.bg));
+        frame.render_widget(footer, area);
+        return;
     }
 
     let help_text = match app.page {
@@ -1189,17 +1223,7 @@ fn detect_log_level(line: &str) -> LogLevel {
 
 /// Color a log line based on its detected level.
 fn highlight_log_line<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
-    let level = detect_log_level(line);
-
-    let color = match level {
-        LogLevel::Error => Color::Rgb(231, 76, 60),   // red
-        LogLevel::Warn => Color::Rgb(230, 180, 40),   // yellow/amber
-        LogLevel::Info => theme.running,               // green
-        LogLevel::Debug => theme.cyan,                 // blue
-        LogLevel::Trace => theme.dim,                  // dim/gray
-        LogLevel::None => theme.text,                  // default
-    };
-
+    let color = log_level_color(detect_log_level(line), theme);
     Line::from(Span::styled(line, Style::default().fg(color)))
 }
 
@@ -1208,34 +1232,73 @@ fn highlight_search_in_line<'a>(line: &'a str, query: &str, theme: &Theme) -> Li
     if query.is_empty() {
         return highlight_log_line(line, theme);
     }
-    let query_lower = query.to_lowercase();
-    let line_lower = line.to_lowercase();
+    let base_color = log_level_color(detect_log_level(line), theme);
+    let match_style = Style::default()
+        .fg(theme.bg)
+        .bg(Color::Rgb(230, 180, 40))
+        .add_modifier(Modifier::BOLD);
+
     let mut spans: Vec<Span<'a>> = Vec::new();
     let mut last = 0;
-
-    let base_color = match detect_log_level(line) {
-        LogLevel::Error => Color::Rgb(231, 76, 60),
-        LogLevel::Warn => Color::Rgb(230, 180, 40),
-        LogLevel::Info => theme.running,
-        LogLevel::Debug => theme.cyan,
-        LogLevel::Trace => theme.dim,
-        LogLevel::None => theme.text,
-    };
-
-    for (start, _) in line_lower.match_indices(&query_lower) {
+    for (start, end) in find_case_insensitive(line, query) {
         if start > last {
             spans.push(Span::styled(&line[last..start], Style::default().fg(base_color)));
         }
-        spans.push(Span::styled(
-            &line[start..start + query.len()],
-            Style::default().fg(theme.bg).bg(Color::Rgb(230, 180, 40)).add_modifier(Modifier::BOLD),
-        ));
-        last = start + query.len();
+        spans.push(Span::styled(&line[start..end], match_style));
+        last = end;
     }
     if last < line.len() {
         spans.push(Span::styled(&line[last..], Style::default().fg(base_color)));
     }
     Line::from(spans)
+}
+
+/// Find case-insensitive matches of `query` in `line`, returned as byte ranges into
+/// the ORIGINAL `line` (always on char boundaries, non-overlapping, in order).
+///
+/// Lowercasing can change a char's byte length (e.g. KELVIN SIGN `K` is 3 bytes but
+/// lowercases to ASCII `k`; `İ` grows from 2 to 3 bytes), so offsets found in the
+/// lowercased text cannot be used to slice the original directly. We build the
+/// lowercased text while recording, for each of its bytes, which original char it came
+/// from, then widen every match outward to whole original chars.
+fn find_case_insensitive(line: &str, query: &str) -> Vec<(usize, usize)> {
+    let query_lower = query.to_lowercase();
+    if query_lower.is_empty() {
+        return Vec::new();
+    }
+    let mut lower = String::with_capacity(line.len());
+    // For each byte of `lower`: (start, end) byte offsets of the source char in `line`.
+    let mut origin: Vec<(usize, usize)> = Vec::with_capacity(line.len());
+    for (offset, ch) in line.char_indices() {
+        let before = lower.len();
+        lower.extend(ch.to_lowercase());
+        let span = (offset, offset + ch.len_utf8());
+        origin.extend(std::iter::repeat_n(span, lower.len() - before));
+    }
+
+    let mut matches = Vec::new();
+    let mut last_end = 0;
+    for (start, m) in lower.match_indices(&query_lower) {
+        let orig_start = origin[start].0;
+        let orig_end = origin[start + m.len() - 1].1;
+        if orig_start >= last_end {
+            matches.push((orig_start, orig_end));
+            last_end = orig_end;
+        }
+    }
+    matches
+}
+
+/// Color used for a log line of the given level.
+fn log_level_color(level: LogLevel, theme: &Theme) -> Color {
+    match level {
+        LogLevel::Error => Color::Rgb(231, 76, 60), // red
+        LogLevel::Warn => Color::Rgb(230, 180, 40), // yellow/amber
+        LogLevel::Info => theme.running,            // green
+        LogLevel::Debug => theme.cyan,              // blue
+        LogLevel::Trace => theme.dim,               // dim/gray
+        LogLevel::None => theme.text,               // default
+    }
 }
 
 fn draw_logs(frame: &mut Frame, app: &mut App, theme: &Theme, area: ratatui::layout::Rect) {
@@ -1370,10 +1433,7 @@ fn draw_action_menu(frame: &mut Frame, app: &App, theme: &Theme) {
     let menu_height = item_count + 2; // +2 for borders
 
     // Center the popup
-    let area = frame.area();
-    let x = area.x + (area.width.saturating_sub(menu_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(menu_height)) / 2;
-    let popup_area = ratatui::layout::Rect::new(x, y, menu_width, menu_height);
+    let popup_area = centered_popup(frame.area(), menu_width, menu_height);
 
     // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
@@ -1443,13 +1503,10 @@ fn draw_exec_shell_menu(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let shell_count = EXEC_SHELLS.len() as u16;
     let popup_width: u16 = 32;
-    // items + title border + hint line + bottom border
-    let popup_height = shell_count + 4;
+    // items + top border + bottom border (the key hint lives in the bottom border)
+    let popup_height = shell_count + 2;
 
-    let area = frame.area();
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = ratatui::layout::Rect::new(x, y, popup_width, popup_height);
+    let popup_area = centered_popup(frame.area(), popup_width, popup_height);
 
     frame.render_widget(Clear, popup_area);
 
@@ -1473,9 +1530,9 @@ fn draw_exec_shell_menu(frame: &mut Frame, app: &App, theme: &Theme) {
     let lines: Vec<Line> = EXEC_SHELLS
         .iter()
         .enumerate()
-        .map(|(i, (path, short))| {
+        .map(|(i, shell)| {
             let is_selected = i == menu.selected;
-            let label = format!("  {:<10}  {}", short, path);
+            let label = format!("  {:<10}{}", shell.name, shell.hint);
             if is_selected {
                 Line::from(Span::styled(
                     label,
@@ -1522,10 +1579,7 @@ fn draw_info_popup(frame: &mut Frame, app: &App, theme: &Theme) {
     let popup_width = (max_text_width + 4) as u16; // padding + borders
     let popup_height = wrapped_lines.len() as u16 + 4; // borders + blank line + dismiss hint
 
-    let area = frame.area();
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = ratatui::layout::Rect::new(x, y, popup_width, popup_height);
+    let popup_area = centered_popup(frame.area(), popup_width, popup_height);
 
     frame.render_widget(Clear, popup_area);
 
@@ -1561,10 +1615,7 @@ fn draw_info_popup(frame: &mut Frame, app: &App, theme: &Theme) {
 fn draw_quit_confirm(frame: &mut Frame, theme: &Theme) {
     let popup_width: u16 = 44;
     let popup_height: u16 = 6;
-    let area = frame.area();
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
-    let popup_area = ratatui::layout::Rect::new(x, y, popup_width, popup_height);
+    let popup_area = centered_popup(frame.area(), popup_width, popup_height);
 
     frame.render_widget(Clear, popup_area);
 
@@ -1591,6 +1642,49 @@ fn draw_quit_confirm(frame: &mut Frame, theme: &Theme) {
             " Any other key to cancel",
             Style::default().fg(theme.dim),
         )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_action_confirm(frame: &mut Frame, pending: &crate::app::PendingAction, theme: &Theme) {
+    use crate::app::ContainerAction;
+
+    let (title, warning) = match pending.action {
+        ContainerAction::Remove => (
+            " Remove container? ",
+            "Force-removes it, stopping it first if running.",
+        ),
+        _ => (" Kill container? ", "Sends SIGKILL; the process gets no chance to clean up."),
+    };
+    let name = format!(" {}", pending.container_name);
+    let width = (name.chars().count().max(warning.len()) + 4).clamp(44, 70) as u16;
+    let popup_area = centered_popup(frame.area(), width, 8);
+
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default().fg(theme.title).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(231, 76, 60)))
+        .style(Style::default().bg(theme.bg));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            name,
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(format!(" {}", warning), Style::default().fg(theme.text))),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(" y", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)),
+            Span::styled(": confirm", Style::default().fg(theme.text)),
+        ]),
+        Line::from(Span::styled(" Any other key to cancel", Style::default().fg(theme.dim))),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -1916,5 +2010,88 @@ fn draw_settings(frame: &mut Frame, app: &App, theme: &Theme, area: ratatui::lay
             })
             .collect();
         render_graph(frame, &GraphParams { data: &sample_data, y_max: 10000, color: theme.cyan, style: app.settings.graph_style, title: &graph_title, theme, area: preview_sections[1] });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{ActionMenu, ContainerAction, ExecShellMenu};
+    use crate::settings::Settings;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn test_app() -> App {
+        App::new(Settings::default(), vec![crate::theme::builtin_default()])
+    }
+
+    fn matched<'a>(line: &'a str, query: &str) -> Vec<&'a str> {
+        find_case_insensitive(line, query)
+            .into_iter()
+            .map(|(s, e)| &line[s..e])
+            .collect()
+    }
+
+    // --- find_case_insensitive / highlight_search_in_line ---
+
+    #[test]
+    fn search_ascii_case_insensitive() {
+        assert_eq!(matched("Error: an ERROR occurred", "error"), ["Error", "ERROR"]);
+    }
+
+    #[test]
+    fn search_with_lowercase_shrinking_char_does_not_panic() {
+        // KELVIN SIGN (3 bytes) lowercases to 'k' (1 byte); this used to slice
+        // mid-char and panic.
+        let line = "\u{212A}\u{212A}x";
+        assert_eq!(matched(line, "x"), ["x"]);
+        assert_eq!(matched(line, "k"), ["\u{212A}", "\u{212A}"]);
+        let theme = crate::theme::builtin_default();
+        let rendered = highlight_search_in_line(line, "x", &theme);
+        assert_eq!(rendered.to_string(), line);
+    }
+
+    #[test]
+    fn search_with_lowercase_growing_char_does_not_panic() {
+        // 'İ' (2 bytes) lowercases to "i̇" (3 bytes); a query matching only part of
+        // its expansion widens to the whole original char.
+        let line = "İstanbul İ";
+        assert_eq!(matched(line, "i"), ["İ", "İ"]);
+        assert_eq!(matched(line, "İSTANBUL"), ["İstanbul"]);
+        let theme = crate::theme::builtin_default();
+        assert_eq!(highlight_search_in_line(line, "STAN", &theme).to_string(), line);
+    }
+
+    #[test]
+    fn search_uppercase_query_uses_lowercased_length() {
+        assert_eq!(matched("foo BAR baz", "BAR"), ["BAR"]);
+        assert_eq!(matched("aaa", "aa"), ["aa"]);
+    }
+
+    // --- popups on small terminals ---
+
+    #[test]
+    fn popups_do_not_panic_on_tiny_terminals() {
+        for (w, h) in [(1, 1), (10, 3), (20, 5), (43, 6), (40, 20)] {
+            let mut app = test_app();
+            app.action_menu = Some(ActionMenu::new(ContainerAction::for_running()));
+            app.exec_shell_menu = Some(ExecShellMenu::new("abc".into()));
+            app.info_popup = Some("Some info message that wraps over lines".into());
+            app.quit_confirm = true;
+            app.confirm_action = Some(crate::app::PendingAction {
+                action: ContainerAction::Remove,
+                container_id: "abc".into(),
+                container_name: "a-container-with-a-rather-long-name".into(),
+            });
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn centered_popup_clamps_to_area() {
+        let area = Rect::new(5, 5, 20, 4);
+        assert_eq!(centered_popup(area, 44, 6), area);
+        assert_eq!(centered_popup(area, 10, 2), Rect::new(10, 6, 10, 2));
     }
 }

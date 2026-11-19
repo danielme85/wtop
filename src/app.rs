@@ -300,6 +300,25 @@ impl ContainerAction {
         ]
     }
 
+    /// Destructive actions that must be confirmed before they run.
+    pub fn needs_confirmation(self) -> bool {
+        matches!(self, ContainerAction::Kill | ContainerAction::Remove)
+    }
+
+    /// Present-participle label shown while a lifecycle action is running.
+    pub fn progress_label(self) -> &'static str {
+        match self {
+            ContainerAction::Start => "Starting",
+            ContainerAction::Stop => "Stopping",
+            ContainerAction::Restart => "Restarting",
+            ContainerAction::Pause => "Pausing",
+            ContainerAction::Unpause => "Unpausing",
+            ContainerAction::Kill => "Killing",
+            ContainerAction::Remove => "Removing",
+            ContainerAction::Details | ContainerAction::Logs | ContainerAction::Exec => "Opening",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ContainerAction::Start => "Start",
@@ -316,13 +335,30 @@ impl ContainerAction {
     }
 }
 
-/// Common shells to offer in the exec shell selection menu.
-pub const EXEC_SHELLS: &[(&str, &str)] = &[
-    ("/bin/bash",        "bash"),
-    ("/bin/sh",          "sh"),
-    ("/bin/zsh",         "zsh"),
-    ("/bin/fish",        "fish"),
-    ("/usr/bin/python3", "python3"),
+/// A shell choice in the Exec Shell menu.
+pub struct ExecShell {
+    /// Short name shown in the menu and in status messages.
+    pub name: &'static str,
+    /// One-line hint shown next to the name.
+    pub hint: &'static str,
+    /// Command passed to `docker exec`. Bare names are resolved through the container's
+    /// own PATH, so they work whether the image keeps them in /bin or /usr/bin.
+    pub argv: &'static [&'static str],
+}
+
+/// Shells offered in the exec shell selection menu. "auto" is first (the default) and
+/// picks bash when the image has it, else falls back to POSIX sh (Alpine/BusyBox).
+pub const EXEC_SHELLS: &[ExecShell] = &[
+    ExecShell {
+        name: "auto",
+        hint: "bash, else sh",
+        argv: &["sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash; exec sh"],
+    },
+    ExecShell { name: "bash", hint: "", argv: &["bash"] },
+    ExecShell { name: "sh", hint: "", argv: &["sh"] },
+    ExecShell { name: "zsh", hint: "", argv: &["zsh"] },
+    ExecShell { name: "fish", hint: "", argv: &["fish"] },
+    ExecShell { name: "python3", hint: "", argv: &["python3"] },
 ];
 
 /// State for the exec shell selection submenu.
@@ -344,9 +380,18 @@ impl ExecShellMenu {
         self.selected = self.selected.saturating_sub(1);
     }
 
-    pub fn selected_shell(&self) -> &str {
-        EXEC_SHELLS[self.selected].0
+    pub fn selected_shell(&self) -> &'static ExecShell {
+        &EXEC_SHELLS[self.selected]
     }
+}
+
+/// A container lifecycle action, captured when it is chosen so that it still targets the
+/// same container after the list re-sorts or the selection moves.
+#[derive(Clone, Debug)]
+pub struct PendingAction {
+    pub action: ContainerAction,
+    pub container_id: String,
+    pub container_name: String,
 }
 
 /// State for the action menu popup.
@@ -428,14 +473,18 @@ pub struct App {
     pub info_popup: Option<String>,
     /// Shell selection submenu shown after choosing Exec from the action menu.
     pub exec_shell_menu: Option<ExecShellMenu>,
-    /// Container ID and shell path to exec into (set by shell menu, consumed by run_loop).
-    pub pending_exec: Option<(String, String)>,
+    /// Docker endpoint wtop is connected to; `docker exec` is pointed at the same one.
+    pub docker_host: Option<String>,
     /// Log search: whether the search input is active.
     pub log_search_active: bool,
     /// Log search query string.
     pub log_search_query: String,
     /// Whether the quit-confirmation dialog is showing.
     pub quit_confirm: bool,
+    /// Destructive action awaiting a "y" confirmation (None = no dialog).
+    pub confirm_action: Option<PendingAction>,
+    /// Lifecycle actions running in the background, keyed by container ID.
+    pub actions_in_flight: HashMap<String, PendingAction>,
 }
 
 impl App {
@@ -466,10 +515,12 @@ impl App {
             needs_clear: false,
             info_popup: None,
             exec_shell_menu: None,
-            pending_exec: None,
+            docker_host: None,
             log_search_active: false,
             log_search_query: String::new(),
             quit_confirm: false,
+            confirm_action: None,
+            actions_in_flight: HashMap::new(),
         }
     }
 
@@ -528,6 +579,12 @@ impl App {
         self.selected = self.selected.saturating_sub(1);
     }
 
+    /// True while a text input has focus, so single-letter global shortcuts
+    /// (`q` quit, `s` settings) must be typed into the input instead.
+    pub fn is_typing(&self) -> bool {
+        self.page == Page::Logs && self.log_search_active
+    }
+
     pub fn selected_container_id(&self) -> Option<&str> {
         self.containers.get(self.selected).map(|c| c.id.as_str())
     }
@@ -552,5 +609,26 @@ impl App {
         } else {
             &self.history
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        App::new(Settings::default(), vec![crate::theme::builtin_default()])
+    }
+
+    #[test]
+    fn typing_only_while_log_search_is_active() {
+        let mut app = test_app();
+        assert!(!app.is_typing());
+        app.page = Page::Logs;
+        assert!(!app.is_typing());
+        app.log_search_active = true;
+        assert!(app.is_typing(), "q/s must be typed into the search box");
+        app.page = Page::List;
+        assert!(!app.is_typing());
     }
 }

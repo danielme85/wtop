@@ -4,17 +4,48 @@ use bollard::query_parameters::{
 };
 use bollard::Docker;
 use futures_util::StreamExt;
+use std::time::Duration;
+use tokio::time::timeout;
 
 use crate::app::{ComposeInfo, ContainerDetail, ContainerInfo, ContainerStats};
+use crate::docker_host::{self, DockerHost};
 
-/// Connect to the local Docker daemon via the default socket.
-pub fn connect() -> Result<Docker, bollard::errors::Error> {
-    Docker::connect_with_local_defaults()
+/// Read/write timeout (seconds) for each request to the daemon. Lifecycle actions run in
+/// the background and can legitimately take a while (stop waits for the grace period).
+const CLIENT_TIMEOUT_SECS: u64 = 120;
+
+/// Upper bound for the polling calls made from the UI loop (list, stats, logs, inspect,
+/// ping). They are awaited inline, so a wedged daemon must not freeze the TUI for the
+/// full client timeout.
+const POLL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Build a client for the daemon the `docker` CLI would use (DOCKER_HOST, then the
+/// active docker context, then the default socket). Returns the client together with
+/// the endpoint, which callers must reuse for anything that shells out to the CLI.
+///
+/// Note: this does not contact the daemon; use [`ping`] to check reachability.
+pub fn connect() -> Result<(Docker, DockerHost), String> {
+    let endpoint = docker_host::resolve()?;
+    let host = endpoint.host.as_str();
+    let docker = if host.starts_with("unix://") || host.starts_with("npipe://") {
+        Docker::connect_with_local(host, CLIENT_TIMEOUT_SECS, bollard::API_DEFAULT_VERSION)
+    } else if host.starts_with("tcp://") || host.starts_with("http://") {
+        if endpoint.tls {
+            return Err(format!("TLS Docker endpoints are not supported yet ({})", host));
+        }
+        Docker::connect_with_http(host, CLIENT_TIMEOUT_SECS, bollard::API_DEFAULT_VERSION)
+    } else {
+        return Err(format!("Unsupported Docker endpoint: {}", host));
+    };
+    match docker {
+        Ok(d) => Ok((d, endpoint)),
+        Err(e) => Err(format!("Cannot connect to {}: {}", endpoint.host, e)),
+    }
 }
 
 /// Check if the Docker daemon is reachable.
 pub async fn ping(docker: &Docker) -> bool {
-    docker.ping().await.is_ok()
+    matches!(timeout(POLL_TIMEOUT, docker.ping()).await, Ok(Ok(_)))
 }
 
 /// List all containers and return simplified info.
@@ -24,8 +55,8 @@ pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
         ..Default::default()
     };
 
-    match docker.list_containers(Some(options)).await {
-        Ok(containers) => containers
+    match timeout(POLL_TIMEOUT, docker.list_containers(Some(options))).await {
+        Ok(Ok(containers)) => containers
             .into_iter()
             .map(|c| {
                 let compose_project = c
@@ -59,7 +90,7 @@ pub async fn list_containers(docker: &Docker) -> Vec<ContainerInfo> {
                 }
             })
             .collect(),
-        Err(_) => Vec::new(),
+        Ok(Err(_)) | Err(_) => Vec::new(),
     }
 }
 
@@ -74,20 +105,52 @@ pub async fn fetch_logs(docker: &Docker, container_id: &str, tail: usize) -> Vec
 
     let mut stream = docker.logs(container_id, Some(options));
     let mut lines = Vec::new();
+    // Docker frames are not guaranteed to end on a line (or even UTF-8 char) boundary,
+    // so buffer partial lines per stream until their newline arrives.
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
 
-    while let Some(Ok(output)) = stream.next().await {
-        let text = match output {
-            LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
-                String::from_utf8_lossy(&message).to_string()
+    let read_all = async {
+        while let Some(Ok(output)) = stream.next().await {
+            match output {
+                // Containers started with a TTY (`docker run -t`, compose `tty: true`)
+                // emit a single raw stream that bollard yields as `Console`.
+                LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                    push_log_chunk(&mut stdout_buf, &message, &mut lines)
+                }
+                LogOutput::StdErr { message } => {
+                    push_log_chunk(&mut stderr_buf, &message, &mut lines)
+                }
+                LogOutput::StdIn { .. } => {}
             }
-            _ => continue,
-        };
-        for line in text.lines() {
-            lines.push(strip_ansi_and_control(line));
         }
-    }
+    };
+    // On timeout keep whatever arrived; partial logs beat a frozen UI.
+    let _ = timeout(POLL_TIMEOUT, read_all).await;
+    flush_log_buffer(&mut stdout_buf, &mut lines);
+    flush_log_buffer(&mut stderr_buf, &mut lines);
 
     lines
+}
+
+/// Append `chunk` to the partial-line buffer `buf`, moving every completed line to `out`.
+fn push_log_chunk(buf: &mut Vec<u8>, chunk: &[u8], out: &mut Vec<String>) {
+    buf.extend_from_slice(chunk);
+    let mut start = 0;
+    while let Some(pos) = buf[start..].iter().position(|&b| b == b'\n') {
+        let end = start + pos;
+        out.push(strip_ansi_and_control(&String::from_utf8_lossy(&buf[start..end])));
+        start = end + 1;
+    }
+    buf.drain(..start);
+}
+
+/// Emit whatever is left in a partial-line buffer (a final line without a newline).
+fn flush_log_buffer(buf: &mut Vec<u8>, out: &mut Vec<String>) {
+    if !buf.is_empty() {
+        out.push(strip_ansi_and_control(&String::from_utf8_lossy(buf)));
+        buf.clear();
+    }
 }
 
 /// Strip ANSI escape sequences and control characters from a log line.
@@ -123,7 +186,10 @@ fn strip_ansi_and_control(input: &str) -> String {
 /// Inspect a container and return static detail info (ports, volumes, env, etc.).
 /// Called once when entering the detail/logs page.
 pub async fn inspect_container(docker: &Docker, container_id: &str) -> Option<ContainerDetail> {
-    let inspect = docker.inspect_container(container_id, None).await.ok()?;
+    let inspect = timeout(POLL_TIMEOUT, docker.inspect_container(container_id, None))
+        .await
+        .ok()?
+        .ok()?;
 
     let config = inspect.config.as_ref();
     let state = inspect.state.as_ref();
@@ -229,7 +295,7 @@ pub async fn fetch_stats(docker: &Docker, container_id: &str) -> Option<Containe
         one_shot: true,
     };
     let mut stream = docker.stats(container_id, Some(stats_opts));
-    let stats = stream.next().await?.ok()?;
+    let stats = timeout(POLL_TIMEOUT, stream.next()).await.ok()??.ok()?;
 
     let mut result = ContainerStats::default();
 
@@ -407,5 +473,46 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assemble(chunks: &[&[u8]]) -> Vec<String> {
+        let mut buf = Vec::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            push_log_chunk(&mut buf, c, &mut out);
+        }
+        flush_log_buffer(&mut buf, &mut out);
+        out
+    }
+
+    #[test]
+    fn log_lines_split_on_newlines() {
+        assert_eq!(assemble(&[b"one\ntwo\n"]), ["one", "two"]);
+    }
+
+    #[test]
+    fn log_line_spanning_chunks_is_rejoined() {
+        assert_eq!(assemble(&[b"hel", b"lo\nwor", b"ld\n"]), ["hello", "world"]);
+    }
+
+    #[test]
+    fn log_utf8_char_split_across_chunks_survives() {
+        // "é" is 0xC3 0xA9; splitting it used to produce two replacement chars.
+        assert_eq!(assemble(&[b"caf\xC3", b"\xA9\n"]), ["café"]);
+    }
+
+    #[test]
+    fn log_trailing_line_without_newline_is_kept() {
+        assert_eq!(assemble(&[b"a\nb"]), ["a", "b"]);
+    }
+
+    #[test]
+    fn log_crlf_and_escapes_are_stripped() {
+        assert_eq!(assemble(&[b"\x1b[31mred\x1b[0m\r\n"]), ["red"]);
     }
 }

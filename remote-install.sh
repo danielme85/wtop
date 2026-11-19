@@ -49,23 +49,22 @@ find_install_dir() {
     echo "$HOME/.local/bin"
 }
 
-# Get download URL for the latest release asset
-get_download_url() {
-    asset_name=$1
+# Print the download URL for a named asset from the release JSON on stdin.
+asset_url() {
+    grep -o "\"browser_download_url\": *\"https://github.com/${REPO}/releases/download/[^\"]*/$1\"" \
+        | head -1 | cut -d'"' -f4
+}
 
-    # GitHub Releases API is public — no token needed
-    releases_url="https://api.github.com/repos/${REPO}/releases/latest"
-    download_url=$(curl -fsSL "$releases_url" \
-        | grep -o "\"browser_download_url\": *\"[^\"]*${asset_name}\"" \
-        | head -1 | cut -d'"' -f4)
-
-    if [ -z "$download_url" ]; then
-        printf "Error: No release asset found for %s.\n" "$asset_name" >&2
-        printf "Check https://github.com/%s/releases for available downloads.\n" "$REPO" >&2
+# Print the SHA-256 of a file using whichever tool this system has.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d' ' -f1
+    else
+        printf "Error: need sha256sum or shasum to verify the download.\n" >&2
         exit 1
     fi
-
-    echo "$download_url"
 }
 
 main() {
@@ -80,18 +79,44 @@ main() {
     # Create install dir if needed
     mkdir -p "$install_dir"
 
-    # Download from GitHub Releases (no auth required for public repos)
-    printf "Downloading %s...\n" "$asset_name"
-    url=$(get_download_url "$asset_name")
-
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' EXIT
 
-    curl -fsSL -o "$tmpdir/$asset_name" "$url"
+    # Release metadata (GitHub Releases API is public — no token needed)
+    curl -fsSL --proto '=https' "https://api.github.com/repos/${REPO}/releases/latest" \
+        > "$tmpdir/release.json"
+    url=$(asset_url "$asset_name" < "$tmpdir/release.json")
+    sums_url=$(asset_url "SHA256SUMS" < "$tmpdir/release.json")
 
-    # Install
+    if [ -z "$url" ]; then
+        printf "Error: No release asset found for %s.\n" "$asset_name" >&2
+        printf "Check https://github.com/%s/releases for available downloads.\n" "$REPO" >&2
+        exit 1
+    fi
+    if [ -z "$sums_url" ]; then
+        printf "Error: the latest release does not publish SHA256SUMS; refusing to install\n" >&2
+        printf "an unverified binary. Download manually from https://github.com/%s/releases\n" "$REPO" >&2
+        exit 1
+    fi
+
+    printf "Downloading %s...\n" "$asset_name"
+    curl -fsSL --proto '=https' -o "$tmpdir/$asset_name" "$url"
+    curl -fsSL --proto '=https' -o "$tmpdir/SHA256SUMS" "$sums_url"
+
+    # Verify the checksum before installing anything
+    expected=$(awk -v f="$asset_name" '$2 == f || $2 == "*"f { print $1; exit }' "$tmpdir/SHA256SUMS")
+    actual=$(sha256_of "$tmpdir/$asset_name")
+    if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+        printf "Error: checksum verification failed for %s.\n" "$asset_name" >&2
+        printf "  expected: %s\n  actual:   %s\n" "${expected:-<missing>}" "$actual" >&2
+        exit 1
+    fi
+    printf "Verified SHA-256 %s\n" "$actual"
+
+    # Install (copy into the target dir first, then rename, so it is atomic)
     chmod +x "$tmpdir/$asset_name"
-    mv "$tmpdir/$asset_name" "$install_dir/$BINARY"
+    cp "$tmpdir/$asset_name" "$install_dir/.$BINARY.new"
+    mv "$install_dir/.$BINARY.new" "$install_dir/$BINARY"
 
     printf "Installed %s to %s/%s\n" "$asset_name" "$install_dir" "$BINARY"
 

@@ -2385,6 +2385,8 @@ dependencies = [
  "futures-util",
  "ratatui",
  "serde",
+ "serde_json",
+ "sha2",
  "tokio",
  "toml",
 ]
